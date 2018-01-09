@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use uuid::Uuid;
 
-pub trait Task: Send + Sync + 'static + fmt::Debug {
+pub trait Task: Send + Sync + 'static {
     type Id: Hash + Eq + Ord + Send;
 
     fn get_id(&self) -> Self::Id;
@@ -296,7 +296,9 @@ impl<T: Task> BufferedComp<T> {
         if self.processing_num.load(SeqCst) == self.comp.concurrent_num() {
             self.buffed_tasks.push(task);
         } else if self.buffed_tasks.is_empty() {
-            self.comp.accept_task(task).unwrap();
+            if self.comp.accept_task(task).is_err() {
+                panic!("pipeline should never overfeed the component");
+            }
             self.processing_num.fetch_add(1, SeqCst);
         } else {
             // it is possible that the component did not reach it's maximum concurent num while
@@ -324,7 +326,9 @@ impl<T: Task> BufferedComp<T> {
     fn pop_to_run(&self, num: usize) {
         for _ in 0..num {
             if let Some(task) = self.buffed_tasks.pop() {
-                self.comp.accept_task(task).unwrap();
+                if self.comp.accept_task(task).is_err() {
+                    panic!("pipeline should never overfeed the component");
+                }
             } else {
                 return;
             }
@@ -463,6 +467,57 @@ impl<T: Task> ProcessingTasks<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT};
+
+    //fn get_id(&self) -> Uuid;
+    //fn accept_task(&self, task: Arc<T>) -> Result<(), Arc<T>>;
+    //fn register_cb(&self, cb: Box<Fn(Uuid, Arc<T>)>);
+    //fn concurrent_num(&self) -> usize {
+        //1
+    //}
+
+    struct Fetch {
+        id: UUid,
+        task: Option<Arc<Job>>,
+        cb: Option<Box<Fn(Uuid, Arc<T>)>>,
+    }
+
+    struct Compute {
+        id: UUid,
+        task: Vec<Arc<Job>>,
+        cb: Option<Box<Fn(Uuid, Arc<T>)>>,
+        concurrent_num: usize,
+    }
+
+    struct Store {
+        id: UUid,
+        task: Option<Arc<Job>>,
+        cb: Option<Box<Fn(Uuid, Arc<T>)>>,
+    }
+
+    struct Job {
+        id: usize,
+        is_finished: AtomicBool ,
+    }
+
+    impl Task for Job {
+        type Id = usize;
+        fn get_id(&self) -> usize {
+            self.id
+        }
+
+        fn is_finished(&self) -> bool {
+            self.is_finished.load(SeqCst)
+        }
+    }
+
+    //fn get_id(&self) -> Uuid;
+    //fn accept_task(&self, task: Arc<T>) -> Result<(), Arc<T>>;
+    //fn register_cb(&self, cb: Box<Fn(Uuid, Arc<T>)>);
+    //fn concurrent_num(&self) -> usize {
+        //1
+    //}
 
     #[test]
     fn smoke() {
