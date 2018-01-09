@@ -1,15 +1,16 @@
 #![feature(clone_closures)]
+#![feature(nll)]
 
 #[macro_use]
 extern crate log;
 extern crate uuid;
 
 use std::collections::{HashMap, VecDeque};
-use std::ops::Index;
+use std::ops::{Index, IndexMut};
 use std::fmt;
 use std::thread::{self, JoinHandle};
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 use std::sync::atomic::Ordering::SeqCst;
@@ -28,9 +29,7 @@ pub trait Component<T: Task>: Send + Sync + 'static {
     fn get_id(&self) -> Uuid;
     fn accept_task(&self, task: Arc<T>) -> Result<(), Arc<T>>;
     fn register_cb(&self, cb: Box<Fn(Uuid, Arc<T>)>);
-    fn concurrent_num(&self) -> usize {
-        1
-    }
+    fn concurrent_num(&self) -> usize { 1 }
 }
 
 pub struct Buidler<T: Task> {
@@ -48,11 +47,11 @@ pub struct NoComponent;
 pub struct Pipeline<T: Task> {
     tx: Sender<Message<T>>,
     rx: Option<Receiver<Message<T>>>,
-    inner: Arc<Inner<T>>,
+    inner: Option<Inner<T>>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
-trait AssertKinds: Send + Sync {}
+trait AssertKinds: Send {}
 
 impl<T: Task> AssertKinds for Inner<T> {}
 
@@ -66,11 +65,11 @@ struct Inner<T: Task> {
 }
 
 struct TaskQueue<T: Task> {
-    tasks: Mutex<VecDeque<Arc<T>>>,
+    tasks: VecDeque<Arc<T>>,
 }
 
 struct ProcessingTasks<T: Task> {
-    tasks: Mutex<HashMap<T::Id, Arc<T>>>,
+    tasks: HashMap<T::Id, Arc<T>>,
 }
 
 struct BufferedComp<T: Task> {
@@ -136,25 +135,25 @@ impl<T: Task> Buidler<T> {
         self.comps
             .iter()
             .for_each(|comp| comp.register_cb(Box::new(f.clone())));
-        let inner = Arc::new(Inner {
+        let inner = Inner {
             waiting_tasks: TaskQueue::new(),
             processing_tasks: ProcessingTasks::new(),
             cap: self.cap,
             cb: self.cb.unwrap(),
             comps: BufferedCompQueue::new(self.buf_cap, self.comps),
-        });
+        };
 
         let pipeline = Pipeline {
             tx: tx,
             rx: Some(rx),
-            inner: inner,
+            inner: Some(inner),
             thread_handle: None,
         };
         Ok(pipeline)
     }
 }
 
-fn poll<T: Task>(inner: Arc<Inner<T>>, rx: Receiver<Message<T>>) {
+fn poll<T: Task>(mut inner: Inner<T>, rx: Receiver<Message<T>>) {
     loop {
         match rx.recv().unwrap() {
             Message::NewTask(task) => inner.accept_new_task(task),
@@ -172,7 +171,7 @@ impl<T: Task> Pipeline<T> {
 
     pub fn run(&mut self) {
         let rx = self.rx.take().unwrap();
-        let inner = Arc::clone(&self.inner);
+        let inner = self.inner.take().unwrap();
         let handle = thread::Builder::new()
             .name("pipeline".into())
             .spawn(move || poll(inner, rx))
@@ -180,31 +179,31 @@ impl<T: Task> Pipeline<T> {
         self.thread_handle = Some(handle);
     }
 
-    pub fn accept_task(&self, task: Arc<T>) -> Result<(), Arc<T>> {
-        if self.total_task_num() < self.capacity() {
-            let msg = Message::NewTask(task);
-            self.tx.send(msg).unwrap();
-            Ok(())
-        } else {
-            Err(task)
-        }
-    }
+    //pub fn accept_task(&self, task: Arc<T>) -> Result<(), Arc<T>> {
+        //if self.total_task_num() < self.capacity() {
+            //let msg = Message::NewTask(task);
+            //self.tx.send(msg).unwrap();
+            //Ok(())
+        //} else {
+            //Err(task)
+        //}
+    //}
 
-    pub fn total_task_num(&self) -> usize {
-        self.waiting_task_num() + self.processing_task_num()
-    }
+    //pub fn total_task_num(&self) -> usize {
+        //self.waiting_task_num() + self.processing_task_num()
+    //}
 
-    pub fn waiting_task_num(&self) -> usize {
-        self.inner.waiting_tasks.len()
-    }
+    //pub fn waiting_task_num(&self) -> usize {
+        //self.inner.waiting_tasks.len()
+    //}
 
-    pub fn processing_task_num(&self) -> usize {
-        self.inner.processing_tasks.len()
-    }
+    //pub fn processing_task_num(&self) -> usize {
+        //self.inner.processing_tasks.len()
+    //}
 
-    pub fn capacity(&self) -> usize {
-        self.inner.cap
-    }
+    //pub fn capacity(&self) -> usize {
+        //self.inner.cap
+    //}
 }
 
 impl<T: Task> Drop for Pipeline<T> {
@@ -217,7 +216,7 @@ impl<T: Task> Drop for Pipeline<T> {
 }
 
 impl<T: Task> Inner<T> {
-    fn accept_new_task(&self, task: Arc<T>) {
+    fn accept_new_task(&mut self, task: Arc<T>) {
         if self.comps[0].buf_is_full() {
             self.waiting_tasks.push(task);
         } else {
@@ -227,29 +226,37 @@ impl<T: Task> Inner<T> {
         }
     }
 
-    fn accept_intermediate_task(&self, comp_id: Uuid, task: Arc<T>) {
-        let current_comp = self.comps.current_comp(&comp_id);
-        current_comp.dec_processing();
+    fn accept_intermediate_task(&mut self, comp_id: Uuid, task: Arc<T>) {
+        {
+            let current_comp = self.comps.current_comp_mut(&comp_id);
+            current_comp.dec_processing();
+        }
+        {
+            self.adjust_component(&comp_id);
+            
+            let mut comp_id = comp_id;
+            while let Some(prev) = self.comps.prev_comp_mut(&comp_id) {
+                let id = prev.comp.get_id();
+                self.adjust_component(&id);
+                comp_id = id
+            }
+        }
 
-        let next_comp = self.comps.next_comp(&comp_id);
+        {
+        let next_comp = self.comps.next_comp_mut(&comp_id);
         if task.is_finished() || next_comp.is_none() {
             let res = self.processing_tasks.remove(&task.get_id());
             assert!(res.is_some());
             (self.cb)(task);
         } else {
-            let next = next_comp.clone().unwrap();
+            let next = next_comp.unwrap();
             next.accept_task(task);
         }
 
-        let mut iter = Some(current_comp);
-        while let Some(comp) = iter {
-            let id = comp.comp.get_id();
-            self.adjust_component(&id);
-            iter = self.comps.prev_comp(&id);
         }
     }
 
-    fn adjust_component(&self, comp_id: &Uuid) {
+    fn adjust_component(&mut self, comp_id: &Uuid) {
         let next_vcant = if let Some(next) = self.comps.next_comp(comp_id) {
             self.comps.vcant_num(&next.comp.get_id())
         } else {
@@ -289,7 +296,7 @@ impl<T: Task> BufferedComp<T> {
         }
     }
 
-    fn accept_task(&self, task: Arc<T>) {
+    fn accept_task(&mut self, task: Arc<T>) {
         let buffed_num = self.buffed_tasks.len();
         assert!(buffed_num < self.buf_cap);
 
@@ -323,7 +330,7 @@ impl<T: Task> BufferedComp<T> {
         self.comp.concurrent_num() - self.current_processing()
     }
 
-    fn pop_to_run(&self, num: usize) {
+    fn pop_to_run(&mut self, num: usize) {
         for _ in 0..num {
             if let Some(task) = self.buffed_tasks.pop() {
                 if self.comp.accept_task(task).is_err() {
@@ -359,6 +366,11 @@ impl<T: Task> BufferedCompQueue<T> {
         &self.comps[current]
     }
 
+    fn current_comp_mut(&mut self, comp_id: &Uuid) -> &mut BufferedComp<T> {
+        let current = self.indices[comp_id];
+        &mut self.comps[current]
+    }
+
     fn next_comp(&self, comp_id: &Uuid) -> Option<&BufferedComp<T>> {
         let current = self.indices[comp_id];
         if current == self.comps.len() - 1 {
@@ -368,12 +380,30 @@ impl<T: Task> BufferedCompQueue<T> {
         }
     }
 
+    fn next_comp_mut(&mut self, comp_id: &Uuid) -> Option<&mut BufferedComp<T>> {
+        let current = self.indices[comp_id];
+        if current == self.comps.len() - 1 {
+            None
+        } else {
+            Some(&mut self.comps[current + 1])
+        }
+    }
+
     fn prev_comp(&self, comp_id: &Uuid) -> Option<&BufferedComp<T>> {
         let current = self.indices[comp_id];
         if current == 0 {
             None
         } else {
             Some(&self.comps[current - 1])
+        }
+    }
+
+    fn prev_comp_mut(&mut self, comp_id: &Uuid) -> Option<&mut BufferedComp<T>> {
+        let current = self.indices[comp_id];
+        if current == 0 {
+            None
+        } else {
+            Some(&mut self.comps[current - 1])
         }
     }
 
@@ -413,6 +443,12 @@ impl<T: Task> Index<usize> for BufferedCompQueue<T> {
     }
 }
 
+impl<T: Task> IndexMut<usize> for BufferedCompQueue<T> {
+    fn index_mut(&mut self, index: usize) -> &mut BufferedComp<T> {
+        &mut self.comps[index]
+    }
+}
+
 impl<T: Task> TaskQueue<T> {
     fn new() -> Self {
         TaskQueue {
@@ -420,24 +456,20 @@ impl<T: Task> TaskQueue<T> {
         }
     }
 
-    fn push(&self, task: Arc<T>) {
-        let mut lock = self.tasks.lock().unwrap();
-        lock.push_back(task);
+    fn push(&mut self, task: Arc<T>) {
+        self.tasks.push_back(task);
     }
 
-    fn pop(&self) -> Option<Arc<T>> {
-        let mut lock = self.tasks.lock().unwrap();
-        lock.pop_front()
+    fn pop(&mut self) -> Option<Arc<T>> {
+        self.tasks.pop_front()
     }
 
     fn is_empty(&self) -> bool {
-        let lock = self.tasks.lock().unwrap();
-        lock.is_empty()
+        self.tasks.is_empty()
     }
 
     fn len(&self) -> usize {
-        let lock = self.tasks.lock().unwrap();
-        lock.len()
+        self.tasks.len()
     }
 }
 
@@ -448,19 +480,16 @@ impl<T: Task> ProcessingTasks<T> {
         }
     }
 
-    fn insert(&self, task: Arc<T>) -> Option<Arc<T>> {
-        let mut lock = self.tasks.lock().unwrap();
-        lock.insert(task.get_id(), task)
+    fn insert(&mut self, task: Arc<T>) -> Option<Arc<T>> {
+        self.tasks.insert(task.get_id(), task)
     }
 
-    fn remove(&self, id: &T::Id) -> Option<Arc<T>> {
-        let mut lock = self.tasks.lock().unwrap();
-        lock.remove(id)
+    fn remove(&mut self, id: &T::Id) -> Option<Arc<T>> {
+        self.tasks.remove(id)
     }
 
     fn len(&self) -> usize {
-        let lock = self.tasks.lock().unwrap();
-        lock.len()
+        self.tasks.len()
     }
 }
 
