@@ -116,7 +116,7 @@ impl<T: Task> Buidler<T> {
         self
     }
 
-    pub fn add_comp<C: Component<T> + 'static>(mut self, c: C) -> Self {
+    pub fn add_comp<C: Component<T>>(mut self, c: C) -> Self {
         self.comps.push(Arc::new(c));
         self
     }
@@ -384,8 +384,8 @@ impl<T: Task> BufferedCompQueue<T> {
         if let Some(comp) = self.next_comp(comp_id) {
             // next component's vcant num
             let vcant_num = self.vcant_num(&comp.comp.get_id());
-            let processing_num = comp.processing_num.load(SeqCst);
-            let left = comp.comp.concurrent_num() - processing_num;
+            let processing_num = comp.current_processing();
+            let left = comp.vcant_processing();
             assert!(vcant_num >= processing_num);
             let vcant_num = left.min(vcant_num - processing_num);
             return vcant_num + comp.buf_cap;
@@ -457,5 +457,15 @@ impl<T: Task> ProcessingTasks<T> {
     fn len(&self) -> usize {
         let lock = self.tasks.lock().unwrap();
         lock.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smoke() {
+
     }
 }
