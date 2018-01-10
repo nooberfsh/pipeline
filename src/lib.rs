@@ -1,15 +1,15 @@
 #![feature(clone_closures)]
 
+extern crate futures;
 #[macro_use]
 extern crate log;
 extern crate uuid;
-extern crate futures;
 
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Index, IndexMut};
 use std::thread::{self, JoinHandle};
 use std::hash::Hash;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 use std::sync::atomic::Ordering::SeqCst;
@@ -33,7 +33,9 @@ pub trait Component<T: Task>: Send + 'static {
     fn get_id(&self) -> Uuid;
     fn accept_task(&mut self, task: Arc<T>) -> Result<(), Arc<T>>;
     fn register_cb(&mut self, cb: Box<Fn(Uuid, Arc<T>)>);
-    fn concurrent_num(&self) -> usize { 1 }
+    fn concurrent_num(&self) -> usize {
+        1
+    }
 }
 
 pub struct Buidler<T: Task> {
@@ -174,7 +176,7 @@ impl<T: Task> Buidler<T> {
         };
 
         let mut indices = HashMap::new();
-        let mut views  = Vec::new();
+        let mut views = Vec::new();
         for (i, comp) in self.comps.iter_mut().enumerate() {
             comp.register_cb(Box::new(f.clone()));
             let id = comp.get_id();
@@ -188,9 +190,9 @@ impl<T: Task> Buidler<T> {
         });
 
         let comps = self.comps
-                .into_iter()
-                .map(|comp| BufferedComp::new(comp, Arc::clone(&table)))
-                .collect();
+            .into_iter()
+            .map(|comp| BufferedComp::new(comp, Arc::clone(&table)))
+            .collect();
 
         let queue = BufferedCompQueue {
             indices: Arc::clone(&table.indices),
@@ -220,7 +222,10 @@ impl<T: Task> Pipeline<T> {
     pub fn run(&mut self) {
         let rx = self.rx.take().unwrap();
         let mut inner = self.inner.take().unwrap();
-        let handle = thread::Builder::new().name("pipeline".into()).spawn(move || inner.run(rx)).unwrap();
+        let handle = thread::Builder::new()
+            .name("pipeline".into())
+            .spawn(move || inner.run(rx))
+            .unwrap();
         self.handle = Some(handle);
     }
 
@@ -234,15 +239,27 @@ impl<T: Task> Pipeline<T> {
     }
 
     pub fn total_num(&self) -> usize {
-        query!(QueryRequest::TotalNum, QueryResult::TotalNum, self.tx.clone())
+        query!(
+            QueryRequest::TotalNum,
+            QueryResult::TotalNum,
+            self.tx.clone()
+        )
     }
 
     pub fn processing_num(&self) -> usize {
-        query!(QueryRequest::ProcessingNum, QueryResult::ProcessingNum, self.tx.clone())
+        query!(
+            QueryRequest::ProcessingNum,
+            QueryResult::ProcessingNum,
+            self.tx.clone()
+        )
     }
 
     pub fn waiting_num(&self) -> usize {
-        query!(QueryRequest::WaitingNum, QueryResult::WaitingNum, self.tx.clone())
+        query!(
+            QueryRequest::WaitingNum,
+            QueryResult::WaitingNum,
+            self.tx.clone()
+        )
     }
 }
 
@@ -291,12 +308,12 @@ impl<T: Task> PipelineImpl<T> {
         }
         {
             let next_comp = self.comps.get_next_comp_mut(&id);
-            if task.is_finished() ||  next_comp.is_none() {
+            if task.is_finished() || next_comp.is_none() {
                 let res = self.processing_tasks.remove(&task.get_id());
                 assert!(res.is_some());
                 (self.cb)(task);
             } else {
-                let next_comp = next_comp.unwrap();   
+                let next_comp = next_comp.unwrap();
                 next_comp.accept_task(task);
             }
         }
@@ -323,11 +340,11 @@ impl<T: Task> PipelineImpl<T> {
             QueryRequest::TotalNum => {
                 let num = self.total_num();
                 sender.send(QueryResult::TotalNum(num)).unwrap();
-            },
+            }
             QueryRequest::ProcessingNum => {
                 let num = self.processing_tasks.len();
                 sender.send(QueryResult::ProcessingNum(num)).unwrap();
-            },
+            }
             QueryRequest::WaitingNum => {
                 let num = self.waiting_tasks.len();
                 sender.send(QueryResult::WaitingNum(num)).unwrap();
@@ -403,11 +420,11 @@ impl<T: Task> BufferedComp<T> {
             view.dec_buf_vcant();
             return;
         }
-        
+
         // here means there is no task in the buffer, we should determine where to
         // put this task, the buffer or the componet.
         let num = self.table.real_comp_vcant(&id);
-        if num ==0 {
+        if num == 0 {
             // this means there is no vcant entry in the component.
             self.buffered_tasks.push(task);
             view.dec_buf_vcant();
@@ -416,7 +433,7 @@ impl<T: Task> BufferedComp<T> {
                 panic!("pipeline should never overfeed the component");
             }
             view.inc_processing();
-        } 
+        }
     }
 
     fn pop_to_run(&mut self) -> usize {
@@ -428,7 +445,7 @@ impl<T: Task> BufferedComp<T> {
                     panic!("pipeline should never overfeed the component");
                 }
             } else {
-                break
+                break;
             }
         }
         let view = self.get_view();
@@ -441,12 +458,12 @@ impl<T: Task> BufferedComp<T> {
 }
 
 impl ViewTable {
-    fn vcant_num(&self, id: &Uuid)  -> usize {
+    fn vcant_num(&self, id: &Uuid) -> usize {
         let view = self.get_view(id);
         let buf_vcant = view.buf_vcant_num();
         // fast path. this means there are some tasks in the buffer.
         if buf_vcant != view.buf_cap {
-            return view.buf_cap - buf_vcant
+            return view.buf_cap - buf_vcant;
         }
 
         if let Some(next) = self.get_next_view(id) {
