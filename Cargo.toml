@@ -6,3 +6,4 @@ authors = ["nooberfsh <nooberfsh@gmail.com>"]
 [dependencies]
 uuid = { version = "0.5", features = ["v4"] }
 log = "0.4"
+futures = "0.1"
