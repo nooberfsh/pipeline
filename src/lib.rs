@@ -116,6 +116,20 @@ enum QueryResult {
     WaitingNum(usize),
 }
 
+macro_rules! query {
+    ($req: expr, $res: path, $tx: expr) => {
+        {
+            let (tx, rx) = oneshot::channel();
+            let msg = Message::Query(tx, $req);
+            $tx.send(msg).unwrap();
+            match rx.wait().unwrap() {
+                $res(res) => res,
+                _ => panic!("invalid query result"),
+            }
+        }
+    };
+}
+
 impl<T: Task> Buidler<T> {
     pub fn new() -> Self {
         Buidler {
@@ -220,33 +234,15 @@ impl<T: Task> Pipeline<T> {
     }
 
     pub fn total_num(&self) -> usize {
-        let (tx, rx) = oneshot::channel();
-        let msg = Message::Query(tx, QueryRequest::TotalNum);
-        self.tx.send(msg).unwrap();
-        match rx.wait().unwrap() {
-            QueryResult::TotalNum(num) => num,
-            _ => panic!("invalid query result"),
-        }
+        query!(QueryRequest::TotalNum, QueryResult::TotalNum, self.tx.clone())
     }
 
     pub fn processing_num(&self) -> usize {
-        let (tx, rx) = oneshot::channel();
-        let msg = Message::Query(tx, QueryRequest::ProcessingNum);
-        self.tx.send(msg).unwrap();
-        match rx.wait().unwrap() {
-            QueryResult::ProcessingNum(num) => num,
-            _ => panic!("invalid query result"),
-        }
+        query!(QueryRequest::ProcessingNum, QueryResult::ProcessingNum, self.tx.clone())
     }
 
     pub fn waiting_num(&self) -> usize {
-        let (tx, rx) = oneshot::channel();
-        let msg = Message::Query(tx, QueryRequest::WaitingNum);
-        self.tx.send(msg).unwrap();
-        match rx.wait().unwrap() {
-            QueryResult::WaitingNum(num) => num,
-            _ => panic!("invalid query result"),
-        }
+        query!(QueryRequest::WaitingNum, QueryResult::WaitingNum, self.tx.clone())
     }
 }
 
