@@ -158,6 +158,7 @@ impl<T: Task> Buidler<T> {
     }
 
     pub fn add_comp<C: Component<T>>(mut self, c: C) -> Self {
+        assert!(c.concurrent_num() >= 1);
         self.comps.push(Box::new(c));
         self
     }
