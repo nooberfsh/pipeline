@@ -283,6 +283,17 @@ impl<T: Task> PipelineImpl<T> {
                 Message::Stop => break,
             }
         }
+
+        info!("abandom all tasks in the pipeline");
+        while let Some(task) = self.waiting_tasks.pop() {
+            task.abandon();
+        }
+        self.processing_tasks.drain_to_vec().into_iter().for_each(|t|t.abandon());
+
+        assert_eq!(self.total_num(), 0);
+        assert_eq!(self.processing_tasks.len(), 0);
+        assert_eq!(self.waiting_tasks.len(), 0);
+
         info!("pipeline finished");
     }
 
@@ -591,5 +602,30 @@ impl<T: Task> ProcessingTasks<T> {
 
     fn len(&self) -> usize {
         self.tasks.len()
+    }
+
+    fn drain_to_vec(&mut self) -> Vec<Arc<T>> {
+        self.tasks.drain().map(|(_, v)|v).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT};
+
+    struct MyTask {
+        id: usize,
+        is_finished: AtomicBool,
+        product: AtomicUsize,       
+        is_abandoned: AtomicBool,
+    }
+
+    impl MyTask for Task {
+        type Id = usize;
+        fn get_id(&self) -> usize { self.id }
+        fn is_finished(&self) -> bool { self.is_finished.load(SeqCst) }
+        fn abandon(&self) { self.is_abandoned.set(true, SeqCst) }
     }
 }
