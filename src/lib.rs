@@ -32,7 +32,7 @@ pub trait Task: Send + Sync + 'static {
 pub trait Component<T: Task>: Send + 'static {
     fn get_id(&self) -> Uuid;
     fn accept_task(&mut self, task: Arc<T>) -> Result<(), Arc<T>>;
-    fn register_cb(&mut self, cb: Box<Fn(Uuid, Arc<T>)>);
+    fn register_cb(&mut self, cb: Box<Fn(Uuid, Arc<T>) + Send>);
     fn concurrent_num(&self) -> usize {
         1
     }
@@ -49,6 +49,7 @@ pub struct Buidler<T: Task> {
 
 pub struct Pipeline<T: Task> {
     cap: usize,
+    buf_cap: usize,
     tx: Sender<Message<T>>,
     rx: Option<Receiver<Message<T>>>,
     inner: Option<PipelineImpl<T>>,
@@ -76,11 +77,13 @@ struct BufferedComp<T: Task> {
     table: Arc<ViewTable>,
 }
 
+#[derive(Clone, Debug)]
 struct ViewTable {
     indices: Arc<Indices>,
     views: Vec<BufferedCompView>,
 }
 
+#[derive(Debug)]
 struct BufferedCompView {
     id: Uuid,
     buf_cap: usize,
@@ -109,6 +112,7 @@ enum QueryRequest {
     TotalNum,
     ProcessingNum,
     WaitingNum,
+    ViewTable,
 }
 
 #[derive(Debug)]
@@ -116,6 +120,7 @@ enum QueryResult {
     TotalNum(usize),
     ProcessingNum(usize),
     WaitingNum(usize),
+    ViewTable(ViewTable),
 }
 
 macro_rules! query {
@@ -210,6 +215,7 @@ impl<T: Task> Buidler<T> {
 
         let pipeline = Pipeline {
             cap: self.cap,
+            buf_cap: self.buf_cap,
             tx: tx,
             rx: Some(rx),
             inner: Some(inner),
@@ -239,6 +245,14 @@ impl<T: Task> Pipeline<T> {
         }
     }
 
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    pub fn buf_cap(&self) -> usize {
+        self.buf_cap
+    }
+
     pub fn total_num(&self) -> usize {
         query!(
             QueryRequest::TotalNum,
@@ -259,6 +273,16 @@ impl<T: Task> Pipeline<T> {
         query!(
             QueryRequest::WaitingNum,
             QueryResult::WaitingNum,
+            self.tx.clone()
+        )
+    }
+
+    // used for debug
+    #[allow(dead_code)]
+    fn view_table(&self) -> ViewTable {
+        query!(
+            QueryRequest::ViewTable,
+            QueryResult::ViewTable,
             self.tx.clone()
         )
     }
@@ -288,7 +312,10 @@ impl<T: Task> PipelineImpl<T> {
         while let Some(task) = self.waiting_tasks.pop() {
             task.abandon();
         }
-        self.processing_tasks.drain_to_vec().into_iter().for_each(|t|t.abandon());
+        self.processing_tasks
+            .drain_to_vec()
+            .into_iter()
+            .for_each(|t| t.abandon());
 
         assert_eq!(self.total_num(), 0);
         assert_eq!(self.processing_tasks.len(), 0);
@@ -360,6 +387,10 @@ impl<T: Task> PipelineImpl<T> {
             QueryRequest::WaitingNum => {
                 let num = self.waiting_tasks.len();
                 sender.send(QueryResult::WaitingNum(num)).unwrap();
+            }
+            QueryRequest::ViewTable => {
+                let table = (*self.comps.table).clone();
+                sender.send(QueryResult::ViewTable(table)).unwrap();
             }
         }
     }
@@ -451,8 +482,10 @@ impl<T: Task> BufferedComp<T> {
     fn pop_to_run(&mut self) -> usize {
         let id = self.comp.get_id();
         let num = self.table.real_comp_vcant(&id);
+        let mut res = 0;
         for _ in 0..num {
             if let Some(task) = self.buffered_tasks.pop() {
+                res += 1;
                 if self.comp.accept_task(task).is_err() {
                     panic!("pipeline should never overfeed the component");
                 }
@@ -461,11 +494,11 @@ impl<T: Task> BufferedComp<T> {
             }
         }
         let view = self.get_view();
-        for _ in 0..num {
+        for _ in 0..res {
             view.inc_buf_vcant();
             view.inc_processing();
         }
-        num
+        res
     }
 }
 
@@ -525,6 +558,13 @@ impl ViewTable {
     }
 }
 
+impl Index<usize> for ViewTable {
+    type Output = BufferedCompView;
+    fn index(&self, index: usize) -> &BufferedCompView {
+        &self.views[index]
+    }
+}
+
 impl BufferedCompView {
     fn new(id: Uuid, buf_cap: usize, concurrent: usize) -> Self {
         BufferedCompView {
@@ -562,6 +602,18 @@ impl BufferedCompView {
 
     fn inc_buf_vcant(&self) {
         self.buf_vcant.fetch_add(1, SeqCst);
+    }
+}
+
+impl Clone for BufferedCompView {
+    fn clone(&self) -> Self {
+        BufferedCompView {
+            id: self.id,
+            buf_cap: self.buf_cap,
+            concurrent: self.concurrent,
+            processing: AtomicUsize::new(self.processing.load(SeqCst)),
+            buf_vcant: AtomicUsize::new(self.buf_vcant.load(SeqCst)),
+        }
     }
 }
 
@@ -605,27 +657,241 @@ impl<T: Task> ProcessingTasks<T> {
     }
 
     fn drain_to_vec(&mut self) -> Vec<Arc<T>> {
-        self.tasks.drain().map(|(_, v)|v).collect()
+        self.tasks.drain().map(|(_, v)| v).collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate env_logger;
+
     use super::*;
 
     use std::sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT};
+    use std::sync::Mutex;
 
+    macro_rules! impl_comp {
+        ($t: ident) => (
+            #[derive(Clone)]
+            struct $t {
+                id: Uuid,
+                tasks: Arc<Mutex<Vec<Arc<MyTask>>>>,
+                cb: Arc<Mutex<Option<Box<Fn(Uuid, Arc<MyTask>) + Send>>>>,
+                concurrent: usize,
+                product: usize,
+            }
+
+            impl $t {
+                fn new(concurrent: usize, product: usize) -> Self {
+                    $t {
+                        id: Uuid::new_v4(),
+                        tasks: Default::default(),
+                        cb: Default::default(),
+                        concurrent: concurrent,
+                        product: product,
+                    }
+                }
+
+                fn handle_one(&self) {
+                    let mut lock = self.tasks.lock().unwrap();
+                    let task = lock.pop().unwrap();
+                    task.add_product(self.product);
+                    drop(lock);
+                    let lock = self.cb.lock().unwrap();
+                    let cb = lock.as_ref().unwrap();
+                    cb(self.id, task);
+                }
+            }
+
+            impl Component<MyTask> for $t {
+                fn get_id(&self) -> Uuid { self.id }
+                fn accept_task(&mut self, task: Arc<MyTask>) -> Result<(), Arc<MyTask>> {
+                    let mut lock = self.tasks.lock().unwrap();
+                    if lock.len() < self.concurrent {
+                        Ok(lock.push(task))
+                    } else {
+                        Err(task)
+                    }
+                }
+                fn register_cb(&mut self, cb: Box<Fn(Uuid, Arc<MyTask>) + Send>) {
+                    let mut lock = self.cb.lock().unwrap();
+                    *lock = Some(cb);
+                }
+                fn concurrent_num(&self) -> usize {self.concurrent}
+            }
+        );
+    }
+
+    fn check_view(view: &BufferedCompView, buffered: usize, processing: usize) {
+        assert_eq!(view.processing.load(SeqCst), processing);
+        assert_eq!(view.buf_cap - view.buf_vcant.load(SeqCst), buffered);
+    }
+
+    fn check_product(task: &Arc<MyTask>, product: usize) {
+        let t = task.product.load(SeqCst);
+        let r = t & product;
+        assert_ne!(r, 0);
+    }
+
+    #[derive(Debug)]
     struct MyTask {
         id: usize,
         is_finished: AtomicBool,
-        product: AtomicUsize,       
+        product: AtomicUsize,
         is_abandoned: AtomicBool,
     }
 
-    impl MyTask for Task {
+    impl_comp!(FetchComp);
+    impl_comp!(ExecuteComp);
+    impl_comp!(WriteComp);
+
+    const FETCH_PRODUCT: usize = 0x1;
+    const EXECUTE_PRODUCT: usize = 0x10;
+    const WRITE_PRODUCT: usize = 0x100;
+
+    impl Task for MyTask {
         type Id = usize;
-        fn get_id(&self) -> usize { self.id }
-        fn is_finished(&self) -> bool { self.is_finished.load(SeqCst) }
-        fn abandon(&self) { self.is_abandoned.set(true, SeqCst) }
+        fn get_id(&self) -> usize {
+            self.id
+        }
+        fn is_finished(&self) -> bool {
+            self.is_finished.load(SeqCst)
+        }
+        fn abandon(&self) {
+            self.is_abandoned.store(true, SeqCst)
+        }
+    }
+
+    impl MyTask {
+        fn new(id: usize) -> Arc<MyTask> {
+            let t = MyTask {
+                id: id,
+                is_finished: ATOMIC_BOOL_INIT,
+                product: ATOMIC_USIZE_INIT,
+                is_abandoned: ATOMIC_BOOL_INIT,
+            };
+            Arc::new(t)
+        }
+
+        fn add_product(&self, product: usize) {
+            let p = self.product.load(SeqCst);
+            self.product.store(p + product, SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_some_tasks() {
+        let _ = env_logger::init().unwrap();
+        let fetch_comp = FetchComp::new(2, FETCH_PRODUCT);
+        let execute_comp = ExecuteComp::new(2, EXECUTE_PRODUCT);
+        let write_comp = WriteComp::new(2, WRITE_PRODUCT);
+
+        let (g_tx, g_rx) = mpsc::channel();
+        let f = move |t| g_tx.send(t).unwrap();
+        let mut pipeline = Buidler::new()
+            .cb(f)
+            .add_comp(fetch_comp.clone())
+            .add_comp(execute_comp.clone())
+            .add_comp(write_comp.clone())
+            .build()
+            .unwrap();
+
+        pipeline.run();
+        let buf_cap = pipeline.buf_cap();
+
+        // test single task
+        let task = MyTask::new(0);
+        pipeline.accept_task(task).unwrap();
+
+        assert_eq!(pipeline.total_num(), 1);
+        assert_eq!(pipeline.processing_num(), 1);
+        assert_eq!(pipeline.waiting_num(), 0);
+
+        let table = pipeline.view_table();
+        assert_eq!(table.views.len(), 3);
+        check_view(&table[0], 0, 1);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        fetch_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 1);
+        check_view(&table[2], 0, 0);
+
+        execute_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 1);
+
+        write_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        let task = g_rx.recv().unwrap();
+        check_product(&task, FETCH_PRODUCT);
+        check_product(&task, EXECUTE_PRODUCT);
+        check_product(&task, WRITE_PRODUCT);
+
+        // test three tasks
+        (1..4).for_each(|id| pipeline.accept_task(MyTask::new(id)).unwrap());
+        assert_eq!(pipeline.total_num(), 3);
+        assert_eq!(pipeline.processing_num(), 3);
+        assert_eq!(pipeline.waiting_num(), 0);
+
+        let table = pipeline.view_table();
+        assert_eq!(table.views.len(), 3);
+        check_view(&table[0], 1, 2);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        fetch_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 2);
+        check_view(&table[1], 0, 1);
+        check_view(&table[2], 0, 0);
+
+        execute_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 2);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 1);
+
+        fetch_comp.handle_one();
+        fetch_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 2);
+        check_view(&table[2], 0, 1);
+
+        execute_comp.handle_one();
+        execute_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 1, 2);
+
+        write_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 2);
+
+        write_comp.handle_one();
+        write_comp.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        for _ in 1..4 {
+            let task = g_rx.recv().unwrap();
+            check_product(&task, FETCH_PRODUCT);
+            check_product(&task, EXECUTE_PRODUCT);
+            check_product(&task, WRITE_PRODUCT);
+        }
     }
 }
