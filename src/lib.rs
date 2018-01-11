@@ -503,12 +503,14 @@ impl<T: Task> BufferedComp<T> {
 }
 
 impl ViewTable {
+    /// indicate that how many tasks the buffered component can handle in the
+    /// current status.
     fn vcant_num(&self, id: &Uuid) -> usize {
         let view = self.get_view(id);
         let buf_vcant = view.buf_vcant_num();
         // fast path. this means there are some tasks in the buffer.
         if buf_vcant != view.buf_cap {
-            return view.buf_cap - buf_vcant;
+            return buf_vcant;
         }
 
         if let Some(next) = self.get_next_view(id) {
@@ -522,6 +524,8 @@ impl ViewTable {
         }
     }
 
+    /// indicate that how many tasks the user's component can handle in the current
+    /// status.
     fn real_comp_vcant(&self, id: &Uuid) -> usize {
         let view = self.get_view(id);
         if let Some(next) = self.get_next_view(id) {
@@ -779,33 +783,47 @@ mod tests {
         }
     }
 
+    impl BufferedCompView {
+        fn set_buffered_num(&self, num :usize) {
+            assert!(self.buf_cap >= num);
+            self.buf_vcant.store(self.buf_cap - num, SeqCst);
+        }
+
+        fn set_processing_num(&self, num: usize) {
+            assert!(self.concurrent >= num);
+            self.processing.store(num, SeqCst);
+        }
+    }
+
+    macro_rules! init {
+        ($pipeline: ident, $config: expr, $g_rx: ident, $fc: ident, $ec: ident, $wc: ident, $con: expr) => {
+            let _ = env_logger::init();
+            let $fc = FetchComp::new($con[0], FETCH_PRODUCT);
+            let $ec = ExecuteComp::new($con[1], EXECUTE_PRODUCT);
+            let $wc = WriteComp::new($con[2], WRITE_PRODUCT);
+
+            let (g_tx, $g_rx) = mpsc::channel();
+            let f = move |t| g_tx.send(t).unwrap();
+            let mut $pipeline = Buidler::new()
+                .cb(f)
+                .cap($config[0])
+                .cap($config[1])
+                .add_comp($fc.clone())
+                .add_comp($ec.clone())
+                .add_comp($wc.clone())
+                .build()
+                .unwrap();
+            $pipeline.run();
+        }
+    }
+
     #[test]
-    fn test_some_tasks() {
-        let _ = env_logger::init().unwrap();
-        let fetch_comp = FetchComp::new(2, FETCH_PRODUCT);
-        let execute_comp = ExecuteComp::new(2, EXECUTE_PRODUCT);
-        let write_comp = WriteComp::new(2, WRITE_PRODUCT);
-
-        let (g_tx, g_rx) = mpsc::channel();
-        let f = move |t| g_tx.send(t).unwrap();
-        let mut pipeline = Buidler::new()
-            .cb(f)
-            .add_comp(fetch_comp.clone())
-            .add_comp(execute_comp.clone())
-            .add_comp(write_comp.clone())
-            .build()
-            .unwrap();
-
-        pipeline.run();
-        let buf_cap = pipeline.buf_cap();
+    fn smoke() {
+        init!(pipeline, [64, 4], g_rx, fetch_comp, execute_comp, write_comp, [2,2,2]);
 
         // test single task
         let task = MyTask::new(0);
         pipeline.accept_task(task).unwrap();
-
-        assert_eq!(pipeline.total_num(), 1);
-        assert_eq!(pipeline.processing_num(), 1);
-        assert_eq!(pipeline.waiting_num(), 0);
 
         let table = pipeline.view_table();
         assert_eq!(table.views.len(), 3);
@@ -838,9 +856,6 @@ mod tests {
 
         // test three tasks
         (1..4).for_each(|id| pipeline.accept_task(MyTask::new(id)).unwrap());
-        assert_eq!(pipeline.total_num(), 3);
-        assert_eq!(pipeline.processing_num(), 3);
-        assert_eq!(pipeline.waiting_num(), 0);
 
         let table = pipeline.view_table();
         assert_eq!(table.views.len(), 3);
@@ -892,6 +907,62 @@ mod tests {
             check_product(&task, FETCH_PRODUCT);
             check_product(&task, EXECUTE_PRODUCT);
             check_product(&task, WRITE_PRODUCT);
+        }
+    }
+
+    #[test]
+    fn test_view_table() {
+        let mut cons = vec![];
+        for i in 1..11 {
+            for j in 1..11 {
+                for k in 1..11 {
+                    cons.push([i,j,k]);
+                }
+            }
+        }
+        let cap = 1024;
+        let buf_cap = 4;
+        for con in cons {
+            let fc = con[0];
+            let ec = con[1];
+            let wc = con[2];
+
+            init!(pipeline, [cap, buf_cap], _g_rx, fetch_comp, execute_comp, write_comp, con);
+            let table = pipeline.view_table();
+
+            let mut wc_bp  = vec![];
+            for i in 0..wc + 1 {
+                wc_bp.push([0, i]);
+            }
+            for i in 1..buf_cap + 1 {
+                wc_bp.push([i, wc]);
+            }
+
+            for bp in wc_bp {
+                table[2].set_buffered_num(bp[0]);
+                table[2].set_processing_num(bp[1]);
+                let wc_v = table.vcant_num(&write_comp.id);
+                let wc_r = table.real_comp_vcant(&write_comp.id);
+                assert_eq!(wc_v, wc - table[2].processing_num() + table[2].buf_vcant_num());
+                assert_eq!(wc_r, wc - table[2].processing_num());
+            
+                let mut ec_bp =  vec![];
+                let max = ec.min(wc_v);
+                for i in 0..max + 1 {
+                    ec_bp.push([0, i]);
+                }
+                for i in 1..buf_cap + 1 {
+                    ec_bp.push([i, max]);
+                }
+                for bp in ec_bp {
+                    table[1].set_buffered_num(bp[0]);
+                    table[1].set_processing_num(bp[1]);
+                    let ec_v = table.vcant_num(&execute_comp.id);
+                    let ec_r = table.real_comp_vcant(&execute_comp.id);
+                    assert_eq!(ec_v, max - table[1].processing_num() + table[1].buf_vcant_num());
+                    assert_eq!(ec_r, max - table[1].processing_num());
+                }
+            }
         }
     }
 }
