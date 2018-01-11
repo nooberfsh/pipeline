@@ -277,7 +277,7 @@ impl<T: Task> Pipeline<T> {
         )
     }
 
-    // used for debug
+    // used for debuging
     #[allow(dead_code)]
     fn view_table(&self) -> ViewTable {
         query!(
@@ -456,9 +456,9 @@ impl<T: Task> BufferedComp<T> {
         let id = self.get_id();
         let view = self.table.get_view(&id);
         let buf_vcant = view.buf_vcant_num();
+        assert!(buf_vcant > 0);
         // fast path. this means there are some tasks in the buffer.
         if buf_vcant != view.buf_cap {
-            assert!(buf_vcant > 0);
             self.buffered_tasks.push(task);
             view.dec_buf_vcant();
             return;
@@ -910,12 +910,45 @@ mod tests {
         }
     }
 
+    // generate [buffered tasks num, processing tasks num] pairs
+    fn gen_bp_pairs(buf_cap: usize, max_processing: usize) -> Vec<[usize; 2]> {
+        let mut ret = vec![];
+        for i in 0..max_processing + 1 {
+            ret.push([0, i]);
+        }
+        for i in 1..buf_cap+1 {
+            ret.push([i, max_processing]);
+        }
+        ret
+    }
+
+    fn check_vcant(table: &ViewTable, view: &BufferedCompView, max_processing: usize, bp: [usize; 2]) -> usize {
+        view.set_buffered_num(bp[0]);
+        view.set_processing_num(bp[1]);
+        let v = table.vcant_num(&view.id);
+        let r = table.real_comp_vcant(&view.id);
+        assert_eq!(v, max_processing - view.processing_num() + view.buf_vcant_num());
+        assert_eq!(r, max_processing - view.processing_num());
+        v
+    }
+
+    fn check_vcant2(table: &ViewTable, i: usize, cons: &[usize], next_vcant: usize) {
+        let view = &table[i];
+        let max = next_vcant.min(cons[i]);
+        for bp in gen_bp_pairs(view.buf_cap, max) {
+            let next_vcant = check_vcant(table, view, max, bp);
+            if i != 0 {
+                check_vcant2(table, i - 1, cons, next_vcant)
+            }
+        }
+    }
+
     #[test]
     fn test_view_table() {
         let mut cons = vec![];
-        for i in 1..11 {
-            for j in 1..11 {
-                for k in 1..11 {
+        for i in 1..10 {
+            for j in 1..10 {
+                for k in 1..10 {
                     cons.push([i,j,k]);
                 }
             }
@@ -923,46 +956,9 @@ mod tests {
         let cap = 1024;
         let buf_cap = 4;
         for con in cons {
-            let fc = con[0];
-            let ec = con[1];
-            let wc = con[2];
-
             init!(pipeline, [cap, buf_cap], _g_rx, fetch_comp, execute_comp, write_comp, con);
             let table = pipeline.view_table();
-
-            let mut wc_bp  = vec![];
-            for i in 0..wc + 1 {
-                wc_bp.push([0, i]);
-            }
-            for i in 1..buf_cap + 1 {
-                wc_bp.push([i, wc]);
-            }
-
-            for bp in wc_bp {
-                table[2].set_buffered_num(bp[0]);
-                table[2].set_processing_num(bp[1]);
-                let wc_v = table.vcant_num(&write_comp.id);
-                let wc_r = table.real_comp_vcant(&write_comp.id);
-                assert_eq!(wc_v, wc - table[2].processing_num() + table[2].buf_vcant_num());
-                assert_eq!(wc_r, wc - table[2].processing_num());
-            
-                let mut ec_bp =  vec![];
-                let max = ec.min(wc_v);
-                for i in 0..max + 1 {
-                    ec_bp.push([0, i]);
-                }
-                for i in 1..buf_cap + 1 {
-                    ec_bp.push([i, max]);
-                }
-                for bp in ec_bp {
-                    table[1].set_buffered_num(bp[0]);
-                    table[1].set_processing_num(bp[1]);
-                    let ec_v = table.vcant_num(&execute_comp.id);
-                    let ec_r = table.real_comp_vcant(&execute_comp.id);
-                    assert_eq!(ec_v, max - table[1].processing_num() + table[1].buf_vcant_num());
-                    assert_eq!(ec_r, max - table[1].processing_num());
-                }
-            }
+            check_vcant2(&table, 2, &con, !0);
         }
     }
 }
