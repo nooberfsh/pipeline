@@ -937,31 +937,20 @@ mod tests {
         ret
     }
 
-    fn check_vcant(
-        table: &ViewTable,
-        view: &BufferedCompView,
-        max_processing: usize,
-        bp: [usize; 2],
-    ) -> usize {
-        view.set_buffered_num(bp[0]);
-        view.set_processing_num(bp[1]);
-        let v = table.vcant_num(&view.id);
-        let r = table.real_comp_vcant(&view.id);
-        assert_eq!(
-            v,
-            max_processing - view.processing_num() + view.buf_vcant_num()
-        );
-        assert_eq!(r, max_processing - view.processing_num());
-        v
-    }
-
-    fn check_vcant2(table: &ViewTable, i: usize, cons: &[usize], next_vcant: usize) {
+    fn check_vcant(table: &ViewTable, i: usize, cons: &[usize], next_vcant: usize) {
         let view = &table[i];
+        // the max num tasks can the current component processing.
         let max = next_vcant.min(cons[i]);
         for bp in gen_bp_pairs(view.buf_cap, max) {
-            let next_vcant = check_vcant(table, view, max, bp);
+            view.set_buffered_num(bp[0]);
+            view.set_processing_num(bp[1]);
+            let v = table.vcant_num(&view.id);
+            let r = table.real_comp_vcant(&view.id);
+            let p = view.processing_num();
+            assert_eq!(v, max - p + view.buf_vcant_num());
+            assert_eq!(r, max - p);
             if i != 0 {
-                check_vcant2(table, i - 1, cons, next_vcant)
+                check_vcant(table, i - 1, cons, v)
             }
         }
     }
@@ -1002,7 +991,7 @@ mod tests {
         let cons_p = concurrent_permutation(levels, 1..12);
         for cons in cons_p {
             let table = new_view_table(buf_cap, &cons);
-            check_vcant2(&table, levels - 1, &cons, !0);
+            check_vcant(&table, levels - 1, &cons, !0);
         }
     }
 }
