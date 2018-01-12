@@ -678,6 +678,7 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT};
+    use std::ops::Range;
     use std::sync::Mutex;
 
     macro_rules! impl_comp {
@@ -790,7 +791,7 @@ mod tests {
     }
 
     impl BufferedCompView {
-        fn set_buffered_num(&self, num :usize) {
+        fn set_buffered_num(&self, num: usize) {
             assert!(self.buf_cap >= num);
             self.buf_vcant.store(self.buf_cap - num, SeqCst);
         }
@@ -802,30 +803,38 @@ mod tests {
     }
 
     macro_rules! init {
-        ($pipeline: ident, $config: expr, $g_rx: ident, $fc: ident, $ec: ident, $wc: ident, $con: expr) => {
+        ($pp: ident, $config: expr, $rx: ident, $fc: ident, $ec: ident, $wc: ident, $con: expr) => {
             let _ = env_logger::init();
             let $fc = FetchComp::new($con[0], FETCH_PRODUCT);
             let $ec = ExecuteComp::new($con[1], EXECUTE_PRODUCT);
             let $wc = WriteComp::new($con[2], WRITE_PRODUCT);
 
-            let (g_tx, $g_rx) = mpsc::channel();
-            let f = move |t| g_tx.send(t).unwrap();
-            let mut $pipeline = Buidler::new()
+            let (tx, $rx) = mpsc::channel();
+            let f = move |t| tx.send(t).unwrap();
+            let mut $pp = Buidler::new()
                 .cb(f)
                 .cap($config[0])
-                .cap($config[1])
+                .buf_cap($config[1])
                 .add_comp($fc.clone())
                 .add_comp($ec.clone())
                 .add_comp($wc.clone())
                 .build()
                 .unwrap();
-            $pipeline.run();
+            $pp.run();
         }
     }
 
     #[test]
     fn smoke() {
-        init!(pipeline, [64, 4], g_rx, fetch_comp, execute_comp, write_comp, [2,2,2]);
+        init!(
+            pipeline,
+            [64, 4],
+            g_rx,
+            fetch_comp,
+            execute_comp,
+            write_comp,
+            [2, 2, 2]
+        );
 
         // test single task
         let task = MyTask::new(0);
@@ -922,18 +931,26 @@ mod tests {
         for i in 0..max_processing + 1 {
             ret.push([0, i]);
         }
-        for i in 1..buf_cap+1 {
+        for i in 1..buf_cap + 1 {
             ret.push([i, max_processing]);
         }
         ret
     }
 
-    fn check_vcant(table: &ViewTable, view: &BufferedCompView, max_processing: usize, bp: [usize; 2]) -> usize {
+    fn check_vcant(
+        table: &ViewTable,
+        view: &BufferedCompView,
+        max_processing: usize,
+        bp: [usize; 2],
+    ) -> usize {
         view.set_buffered_num(bp[0]);
         view.set_processing_num(bp[1]);
         let v = table.vcant_num(&view.id);
         let r = table.real_comp_vcant(&view.id);
-        assert_eq!(v, max_processing - view.processing_num() + view.buf_vcant_num());
+        assert_eq!(
+            v,
+            max_processing - view.processing_num() + view.buf_vcant_num()
+        );
         assert_eq!(r, max_processing - view.processing_num());
         v
     }
@@ -949,20 +966,43 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_view_table() {
-        let mut cons = vec![];
-        for i in 1..10 {
-            for j in 1..10 {
-                for k in 1..10 {
-                    cons.push([i,j,k]);
-                }
+    fn new_view_table(buf_cap: usize, concurrent_nums: &[usize]) -> ViewTable {
+        assert!(!concurrent_nums.is_empty());
+
+        let mut views = vec![];
+        for con in concurrent_nums {
+            let id = Uuid::new_v4();
+            let view = BufferedCompView::new(id, buf_cap, *con);
+            views.push(view);
+        }
+        ViewTable::new(views)
+    }
+
+    fn concurrent_permutation(levels: usize, range: Range<usize>) -> Vec<Vec<usize>> {
+        assert_ne!(levels, 0);
+        if levels == 1 {
+            return range.map(|i| vec![i]).collect();
+        }
+        let mut ret = vec![];
+        let rhs = concurrent_permutation(levels - 1, range.clone());
+        for tup in rhs {
+            for i in range.clone() {
+                let mut e = tup.clone();
+                e.push(i);
+                ret.push(e)
             }
         }
-        for con in cons {
-            init!(pipeline, [1024, 4], _g_rx, fetch_comp, execute_comp, write_comp, con);
-            let table = pipeline.view_table();
-            check_vcant2(&table, 2, &con, !0);
+        ret
+    }
+
+    #[test]
+    fn test_view_table() {
+        let levels = 3;
+        let buf_cap = 4;
+        let cons_p = concurrent_permutation(levels, 1..12);
+        for cons in cons_p {
+            let table = new_view_table(buf_cap, &cons);
+            check_vcant2(&table, levels - 1, &cons, !0);
         }
     }
 }
