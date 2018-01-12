@@ -590,6 +590,10 @@ impl BufferedCompView {
         self.processing.load(SeqCst)
     }
 
+    fn bufferd_num(&self) -> usize {
+        self.buf_cap - self.buf_vcant_num()
+    }
+
     fn buf_vcant_num(&self) -> usize {
         self.buf_vcant.load(SeqCst)
     }
@@ -693,9 +697,9 @@ mod tests {
             }
 
             impl $t {
-                fn new(concurrent: usize, product: usize) -> Self {
+                fn new(id: Uuid, concurrent: usize, product: usize) -> Self {
                     $t {
-                        id: Uuid::new_v4(),
+                        id: id,
                         tasks: Default::default(),
                         cb: Default::default(),
                         concurrent: concurrent,
@@ -755,10 +759,12 @@ mod tests {
     impl_comp!(FetchComp);
     impl_comp!(ExecuteComp);
     impl_comp!(WriteComp);
+    impl_comp!(FakeComp);
 
     const FETCH_PRODUCT: usize = 0x1;
     const EXECUTE_PRODUCT: usize = 0x10;
     const WRITE_PRODUCT: usize = 0x100;
+    const FAKE_PRODUCT: usize = 0x1000;
 
     impl Task for MyTask {
         type Id = usize;
@@ -805,9 +811,9 @@ mod tests {
     macro_rules! init {
         ($pp: ident, $config: expr, $rx: ident, $fc: ident, $ec: ident, $wc: ident, $con: expr) => {
             let _ = env_logger::init();
-            let $fc = FetchComp::new($con[0], FETCH_PRODUCT);
-            let $ec = ExecuteComp::new($con[1], EXECUTE_PRODUCT);
-            let $wc = WriteComp::new($con[2], WRITE_PRODUCT);
+            let $fc = FetchComp::new(Uuid::new_v4(), $con[0], FETCH_PRODUCT);
+            let $ec = ExecuteComp::new(Uuid::new_v4(), $con[1], EXECUTE_PRODUCT);
+            let $wc = WriteComp::new(Uuid::new_v4(), $con[2], WRITE_PRODUCT);
 
             let (tx, $rx) = mpsc::channel();
             let f = move |t| tx.send(t).unwrap();
@@ -992,6 +998,46 @@ mod tests {
         for cons in cons_p {
             let table = new_view_table(buf_cap, &cons);
             check_vcant(&table, levels - 1, &cons, !0);
+        }
+    }
+
+    fn new_buffered_fake_comp(table: &Arc<ViewTable>, index: usize, con: usize) -> BufferedComp<MyTask> {
+        assert!(index < table.len());
+        let view = &table[index];
+        let fake_comp = FakeComp::new(view.id, con, FAKE_PRODUCT);
+        for i in view.processing_num() {
+            fake_comp.accept_task(MyTask::new(i)).unwrap();
+        }
+        let ret = BufferedComp::new(Box::new(fake_comp), Arc::clone(table));
+        for i in view.bufferd_num() {
+            let _ = ret.buffered_tasks.push(MyTask::new(i + view.processing_num()));
+        }
+        ret
+    }
+
+    fn check_buffered_comp(table: Arc<ViewTable>, i: usize, cons: &[usize], next_vcant: usize) {
+        let view = &table[i];
+        // the max num tasks can the current component processing.
+        let max = next_vcant.min(cons[i]);
+        for bp in gen_bp_pairs(view.buf_cap, max) {
+            view.set_buffered_num(bp[0]);
+            view.set_processing_num(bp[1]);
+            let comp = new_buffered_fake_comp(&table, i, cons[i]);
+             
+            if i != 0 {
+                check_buffered_comp(table, i - 1, cons, table.vcant_num(view.id))
+            }
+        }
+    }
+
+    #[test]
+    fn test_bufferd_comp() {
+        let levels = 3;
+        let buf_cap = 4;
+        let cons_p = concurrent_permutation(levels, 1..12);
+        for cons in cons_p {
+            let table = new_view_table(buf_cap, &cons);
+            check_buffered_comp(Arc::new(table), levels - 1, &cons, !0);
         }
     }
 }
