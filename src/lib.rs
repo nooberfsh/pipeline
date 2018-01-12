@@ -181,19 +181,14 @@ impl<T: Task> Buidler<T> {
             }
         };
 
-        let mut indices = HashMap::new();
         let mut views = Vec::new();
-        for (i, comp) in self.comps.iter_mut().enumerate() {
+        for comp in &mut self.comps {
             comp.register_cb(Box::new(f.clone()));
             let id = comp.get_id();
             let view = BufferedCompView::new(id, self.buf_cap, comp.concurrent_num());
-            indices.insert(id, i);
             views.push(view);
         }
-        let table = Arc::new(ViewTable {
-            indices: Arc::new(indices),
-            views: views,
-        });
+        let table = Arc::new(ViewTable::new(views));
 
         let comps = self.comps
             .into_iter()
@@ -503,6 +498,17 @@ impl<T: Task> BufferedComp<T> {
 }
 
 impl ViewTable {
+    fn new(views: Vec<BufferedCompView>) -> Self {
+        let mut indices = HashMap::new();
+        for (i, view) in views.iter().enumerate() {
+            indices.insert(view.id, i);
+        }
+        ViewTable {
+            indices: Arc::new(indices),
+            views: views,
+        }
+    }
+
     /// indicate that how many tasks the buffered component can handle in the
     /// current status.
     fn vcant_num(&self, id: &Uuid) -> usize {
@@ -953,10 +959,8 @@ mod tests {
                 }
             }
         }
-        let cap = 1024;
-        let buf_cap = 4;
         for con in cons {
-            init!(pipeline, [cap, buf_cap], _g_rx, fetch_comp, execute_comp, write_comp, con);
+            init!(pipeline, [1024, 4], _g_rx, fetch_comp, execute_comp, write_comp, con);
             let table = pipeline.view_table();
             check_vcant2(&table, 2, &con, !0);
         }
