@@ -1007,7 +1007,11 @@ mod tests {
         }
     }
 
-    fn new_buffered_fake_comp(table: &Arc<ViewTable>, index: usize, con: usize) -> BufferedComp<MyTask> {
+    fn new_buffered_fake_comp(
+        table: &Arc<ViewTable>,
+        index: usize,
+        con: usize,
+    ) -> BufferedComp<MyTask> {
         assert!(index < table.views.len());
         let view = &table[index];
         let mut fake_comp = FakeComp::new(view.id, con, FAKE_PRODUCT);
@@ -1046,7 +1050,7 @@ mod tests {
                     assert_eq!(buffered, view.buffered_num());
                     assert_eq!(processing + 1, view.processing_num());
                 }
-                assert_eq!(vcant_num -1, table.vcant_num(&view.id));
+                assert_eq!(vcant_num - 1, table.vcant_num(&view.id));
             }
         }
     }
@@ -1070,7 +1074,7 @@ mod tests {
                 assert_eq!(pop_to_run_num, buffered);
             } else {
                 assert_eq!(buffered - real_comp_vcant, view.buffered_num());
-                assert_eq!(processing + real_comp_vcant,  view.processing_num());
+                assert_eq!(processing + real_comp_vcant, view.processing_num());
                 assert_eq!(pop_to_run_num, real_comp_vcant);
             }
         }
