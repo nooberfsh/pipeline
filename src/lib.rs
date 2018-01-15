@@ -297,6 +297,9 @@ impl<T: Task> Drop for Pipeline<T> {
 
 impl<T: Task> PipelineImpl<T> {
     fn run(&mut self, rx: Receiver<Message<T>>) {
+        for comp in &mut self.comps.comps {
+            comp.comp.run();
+        }
         loop {
             match rx.recv().unwrap() {
                 Message::NewTask(task) => self.new_task(task),
