@@ -590,7 +590,8 @@ impl BufferedCompView {
         self.processing.load(SeqCst)
     }
 
-    fn bufferd_num(&self) -> usize {
+    #[allow(dead_code)]
+    fn buffered_num(&self) -> usize {
         self.buf_cap - self.buf_vcant_num()
     }
 
@@ -707,6 +708,7 @@ mod tests {
                     }
                 }
 
+                #[allow(dead_code)]
                 fn handle_one(&self) {
                     let mut lock = self.tasks.lock().unwrap();
                     let task = lock.pop().unwrap();
@@ -805,6 +807,10 @@ mod tests {
         fn set_processing_num(&self, num: usize) {
             assert!(self.concurrent >= num);
             self.processing.store(num, SeqCst);
+        }
+
+        fn is_full(&self) -> bool {
+            self.buf_vcant_num() == 0
         }
     }
 
@@ -1002,42 +1008,83 @@ mod tests {
     }
 
     fn new_buffered_fake_comp(table: &Arc<ViewTable>, index: usize, con: usize) -> BufferedComp<MyTask> {
-        assert!(index < table.len());
+        assert!(index < table.views.len());
         let view = &table[index];
-        let fake_comp = FakeComp::new(view.id, con, FAKE_PRODUCT);
-        for i in view.processing_num() {
+        let mut fake_comp = FakeComp::new(view.id, con, FAKE_PRODUCT);
+        for i in 0..view.processing_num() {
             fake_comp.accept_task(MyTask::new(i)).unwrap();
         }
-        let ret = BufferedComp::new(Box::new(fake_comp), Arc::clone(table));
-        for i in view.bufferd_num() {
-            let _ = ret.buffered_tasks.push(MyTask::new(i + view.processing_num()));
+        let mut ret = BufferedComp::new(Box::new(fake_comp), Arc::clone(table));
+        for i in 0..view.buffered_num() {
+            let id = i + view.processing_num();
+            let _ = ret.buffered_tasks.push(MyTask::new(id));
         }
         ret
     }
 
-    fn check_buffered_comp(table: Arc<ViewTable>, i: usize, cons: &[usize], next_vcant: usize) {
+    fn check_accept_task(table: Arc<ViewTable>, i: usize, cons: &[usize], next_vcant: usize) {
         let view = &table[i];
         // the max num tasks can the current component processing.
         let max = next_vcant.min(cons[i]);
         for bp in gen_bp_pairs(view.buf_cap, max) {
             view.set_buffered_num(bp[0]);
             view.set_processing_num(bp[1]);
-            let comp = new_buffered_fake_comp(&table, i, cons[i]);
-             
-            if i != 0 {
-                check_buffered_comp(table, i - 1, cons, table.vcant_num(view.id))
+            let mut comp = new_buffered_fake_comp(&table, i, cons[i]);
+            let mut id = !0;
+            while !view.is_full() {
+                let vcant_num = table.vcant_num(&view.id);
+                let real_comp_vcant = table.real_comp_vcant(&view.id);
+                let buffered = view.buffered_num();
+                let processing = view.processing_num();
+                let task = MyTask::new(id);
+                id -= 1;
+                comp.accept_task(task);
+                if real_comp_vcant == 0 {
+                    assert_eq!(buffered + 1, view.buffered_num());
+                    assert_eq!(processing, view.processing_num());
+                } else {
+                    assert_eq!(buffered, view.buffered_num());
+                    assert_eq!(processing + 1, view.processing_num());
+                }
+                assert_eq!(vcant_num -1, table.vcant_num(&view.id));
+            }
+        }
+    }
+
+    fn check_pop_to_run(table: Arc<ViewTable>, i: usize, cons: &[usize], next_vcant: usize) {
+        let view = &table[i];
+        // the max num tasks can the current component processing.
+        let max = next_vcant.min(cons[i]);
+        for bp in gen_bp_pairs(view.buf_cap, max) {
+            view.set_buffered_num(bp[0]);
+            view.set_processing_num(bp[1]);
+            let mut comp = new_buffered_fake_comp(&table, i, cons[i]);
+            let buffered = view.buffered_num();
+            let processing = view.processing_num();
+            let real_comp_vcant = table.real_comp_vcant(&view.id);
+
+            let pop_to_run_num = comp.pop_to_run();
+            if buffered <= real_comp_vcant {
+                assert_eq!(0, view.buffered_num());
+                assert_eq!(processing + buffered, view.processing_num());
+                assert_eq!(pop_to_run_num, buffered);
+            } else {
+                assert_eq!(buffered - real_comp_vcant, view.buffered_num());
+                assert_eq!(processing + real_comp_vcant,  view.processing_num());
+                assert_eq!(pop_to_run_num, real_comp_vcant);
             }
         }
     }
 
     #[test]
-    fn test_bufferd_comp() {
-        let levels = 3;
+    fn test_buffered_comp() {
+        let levels = 1;
         let buf_cap = 4;
-        let cons_p = concurrent_permutation(levels, 1..12);
+        let cons_p = concurrent_permutation(levels, 1..9);
         for cons in cons_p {
             let table = new_view_table(buf_cap, &cons);
-            check_buffered_comp(Arc::new(table), levels - 1, &cons, !0);
+            check_accept_task(Arc::new(table.clone()), levels - 1, &cons, !0);
+            check_pop_to_run(Arc::new(table), levels - 1, &cons, !0);
         }
     }
 }
