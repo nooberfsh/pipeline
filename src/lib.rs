@@ -29,13 +29,16 @@ pub trait Task: Send + Sync + 'static {
     fn abandon(&self) {}
 }
 
+pub type Cb<T> = Box<Fn(Uuid, Arc<T>) + Send>;
+
 pub trait Component<T: Task>: Send + 'static {
     fn get_id(&self) -> Uuid;
     fn accept_task(&mut self, task: Arc<T>) -> Result<(), Arc<T>>;
-    fn register_cb(&mut self, cb: Box<Fn(Uuid, Arc<T>) + Send>);
+    fn register_cb(&mut self, cb: Cb<T>);
     fn concurrent_num(&self) -> usize {
         1
     }
+    fn run(&mut self) {}
 }
 
 pub struct Buidler<T: Task> {
@@ -692,7 +695,7 @@ mod tests {
             struct $t {
                 id: Uuid,
                 tasks: Arc<Mutex<Vec<Arc<MyTask>>>>,
-                cb: Arc<Mutex<Option<Box<Fn(Uuid, Arc<MyTask>) + Send>>>>,
+                cb: Arc<Mutex<Option<Cb<MyTask>>>>,
                 concurrent: usize,
                 product: usize,
             }
@@ -730,7 +733,7 @@ mod tests {
                         Err(task)
                     }
                 }
-                fn register_cb(&mut self, cb: Box<Fn(Uuid, Arc<MyTask>) + Send>) {
+                fn register_cb(&mut self, cb: Cb<MyTask>) {
                     let mut lock = self.cb.lock().unwrap();
                     *lock = Some(cb);
                 }
