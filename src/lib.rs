@@ -1,4 +1,4 @@
-#![feature(clone_closures)]
+#![feature(clone_closures, unboxed_closures, fn_traits)]
 
 extern crate futures;
 #[macro_use]
@@ -29,12 +29,44 @@ pub trait Task: Send + Sync + 'static {
     fn abandon(&self) {}
 }
 
-pub type Cb<T> = Box<Fn(Uuid, Arc<T>) + Send>;
+pub struct CompCallBack<T: Task> {
+    tx: Sender<Message<T>>,
+}
+
+impl<T: Task> FnOnce<(Uuid, Arc<T>)> for CompCallBack<T> {
+    type Output = ();
+    extern "rust-call" fn call_once(self, args: (Uuid, Arc<T>)) {
+        self.call(args);
+    }
+}
+
+impl<T: Task> FnMut<(Uuid, Arc<T>)> for CompCallBack<T> {
+    extern "rust-call" fn call_mut(&mut self, args: (Uuid, Arc<T>)) {
+        self.call(args)
+    }
+}
+
+impl<T: Task> Fn<(Uuid, Arc<T>)> for CompCallBack<T> {
+    extern "rust-call" fn call(&self, args: (Uuid, Arc<T>)) {
+        let msg = Message::Intermediate(args.0, args.1);
+        if self.tx.send(msg).is_err() {
+            info!("pipeline was dropped");
+        }
+    }
+}
+
+impl<T: Task> Clone for CompCallBack<T> {
+    fn clone(&self) -> Self {
+        CompCallBack {
+            tx: self.tx.clone(),
+        }
+    }
+}
 
 pub trait Component<T: Task>: Send + 'static {
     fn get_id(&self) -> Uuid;
     fn accept_task(&mut self, task: Arc<T>) -> Result<(), Arc<T>>;
-    fn register_cb(&mut self, cb: Cb<T>);
+    fn register_cb(&mut self, cb: CompCallBack<T>);
     fn concurrent_num(&self) -> usize {
         1
     }
@@ -176,17 +208,11 @@ impl<T: Task> Buidler<T> {
             return Err(NoComponent);
         }
         let (tx, rx) = mpsc::channel();
-        let sender = tx.clone();
-        let f = move |uuid, task| {
-            let msg = Message::Intermediate(uuid, task);
-            if sender.send(msg).is_err() {
-                info!("pipeline was dropped");
-            }
-        };
+        let cb = CompCallBack { tx: tx.clone() };
 
         let mut views = Vec::new();
         for comp in &mut self.comps {
-            comp.register_cb(Box::new(f.clone()));
+            comp.register_cb(cb.clone());
             let id = comp.get_id();
             let view = BufferedCompView::new(id, self.buf_cap, comp.concurrent_num());
             views.push(view);
@@ -229,7 +255,7 @@ impl<T: Task> Pipeline<T> {
         let mut inner = self.inner.take().unwrap();
         let handle = thread::Builder::new()
             .name("pipeline".into())
-            .spawn(move || inner.run(rx))
+            .spawn(move || inner.run(&rx))
             .unwrap();
         self.handle = Some(handle);
     }
@@ -296,7 +322,7 @@ impl<T: Task> Drop for Pipeline<T> {
 }
 
 impl<T: Task> PipelineImpl<T> {
-    fn run(&mut self, rx: Receiver<Message<T>>) {
+    fn run(&mut self, rx: &Receiver<Message<T>>) {
         for comp in &mut self.comps.comps {
             comp.comp.run();
         }
@@ -698,7 +724,7 @@ mod tests {
             struct $t {
                 id: Uuid,
                 tasks: Arc<Mutex<Vec<Arc<MyTask>>>>,
-                cb: Arc<Mutex<Option<Cb<MyTask>>>>,
+                cb: Arc<Mutex<Option<CompCallBack<MyTask>>>>,
                 concurrent: usize,
                 product: usize,
             }
@@ -736,7 +762,7 @@ mod tests {
                         Err(task)
                     }
                 }
-                fn register_cb(&mut self, cb: Cb<MyTask>) {
+                fn register_cb(&mut self, cb: CompCallBack<MyTask>) {
                     let mut lock = self.cb.lock().unwrap();
                     *lock = Some(cb);
                 }
