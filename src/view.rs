@@ -1,4 +1,4 @@
-use std::ops::{Index};
+use std::ops::Index;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 
@@ -26,9 +26,7 @@ pub struct ExctView {
 
 impl ViewTable {
     pub fn new(views: Vec<CompView>) -> Self {
-        ViewTable {
-            views: views,
-        }
+        ViewTable { views: views }
     }
 
     pub fn capacity(&self) -> usize {
@@ -42,7 +40,7 @@ impl ViewTable {
     pub fn vcant_num(&self, id: usize) -> usize {
         let view = &self.views[id];
         if view.buffered_num() != 0 {
-            return view.buf_vcant_num()
+            return view.buf_vcant_num();
         }
 
         view.buf_cap + self.real_comp_vcant(id)
@@ -67,7 +65,7 @@ impl ViewTable {
 
 impl CompView {
     pub fn new(id: usize, buf_cap: usize, exct_views: Vec<ExctView>) -> Self {
-        let concurrency = exct_views.iter().map(|e|e.concurrency).sum();
+        let concurrency = exct_views.iter().map(|e| e.concurrency).sum();
         CompView {
             id: id,
             buf_cap: buf_cap,
@@ -154,4 +152,3 @@ impl ExctView {
         self.concurrency - self.processing.load(SeqCst)
     }
 }
-

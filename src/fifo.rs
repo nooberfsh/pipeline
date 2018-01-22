@@ -7,9 +7,7 @@ pub struct Fifo<T> {
 
 impl<T> Fifo<T> {
     pub fn new() -> Self {
-        Fifo {
-            q: VecDeque::new(),
-        }
+        Fifo { q: VecDeque::new() }
     }
 
     pub fn push(&mut self, t: T) {

@@ -5,7 +5,7 @@ extern crate futures;
 extern crate log;
 extern crate worker;
 
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::thread::{self, JoinHandle};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -15,12 +15,11 @@ use futures::Future;
 use futures::sync::oneshot;
 use worker::general::{Runner, Worker};
 
-
 mod fifo;
 mod view;
 
 use self::fifo::Fifo;
-use self::view::{ViewTable, CompView, ExctView};
+use self::view::{CompView, ExctView, ViewTable};
 
 #[derive(Debug)]
 pub struct NoComponent;
@@ -42,7 +41,9 @@ pub trait Task: Send + Sync + 'static {
 pub trait Executor<T: Task>: Send + 'static {
     fn register_cb(&mut self, cb: ExctCallBack<T>);
     fn execute(&mut self, task: Arc<T>);
-    fn concurrency(&self) -> usize { 1 }
+    fn concurrency(&self) -> usize {
+        1
+    }
     fn run(&mut self) {}
 }
 
@@ -109,13 +110,13 @@ impl<T: Task> PipelineBuilder<T> {
         }
         let table = Arc::new(ViewTable::new(views));
         let cap = table.capacity();
-        
+
         let mut comps = vec![];
         for (i, comp) in self.comps.into_iter().enumerate() {
             let comp_impl = comp.into_comp_impl(i, tx.clone(), Arc::clone(&table));
             comps.push(comp_impl);
         }
-        
+
         let inner = PipelineImpl {
             processing_tasks: HashMap::new(),
             waiting_tasks: Fifo::new(),
@@ -144,26 +145,32 @@ pub struct Component<T: Task> {
 impl<T: Task> Component<T> {
     pub fn new<N: Into<String>, E: Executor<T>>(name: N, buf_cap: usize, e: E) -> Self {
         assert!(e.concurrency() >= 1);
-        Component { 
+        Component {
             name: name.into(),
             buf_cap: buf_cap,
             executors: vec![Box::new(e)],
         }
     }
 
-    pub fn new_with_multi_executor<N: Into<String>, E: Executor<T>>(name: N, buf_cap: usize, exs: Vec<E>) -> Self {
-        assert!(exs.len() >0 );
+    pub fn new_with_multi_executor<N: Into<String>, E: Executor<T>>(
+        name: N,
+        buf_cap: usize,
+        exs: Vec<E>,
+    ) -> Self {
+        assert!(exs.len() > 0);
         exs.iter().for_each(|e| assert!(e.concurrency() > 0));
-        
+
         Component {
             name: name.into(),
             buf_cap: buf_cap,
-            executors: exs.into_iter().map(|e| Box::new(e) as Box<Executor<_>>).collect(),
+            executors: exs.into_iter()
+                .map(|e| Box::new(e) as Box<Executor<_>>)
+                .collect(),
         }
     }
 
     fn exct_views(&self) -> Vec<ExctView> {
-        let mut ret  = Vec::with_capacity(self.executors.len());
+        let mut ret = Vec::with_capacity(self.executors.len());
         for (i, exct) in self.executors.iter().enumerate() {
             let v = ExctView::new(i, exct.concurrency());
             ret.push(v)
@@ -171,7 +178,12 @@ impl<T: Task> Component<T> {
         ret
     }
 
-    fn into_comp_impl(self, id: usize, tx: Sender<Message<T>>, table: Arc<ViewTable>) -> CompImpl<T> {
+    fn into_comp_impl(
+        self,
+        id: usize,
+        tx: Sender<Message<T>>,
+        table: Arc<ViewTable>,
+    ) -> CompImpl<T> {
         let mut workers = vec![];
         for (j, mut e) in self.executors.into_iter().enumerate() {
             let cb = ExctCallBack {
@@ -185,7 +197,7 @@ impl<T: Task> Component<T> {
             let worker = Worker::new(name, CompRunner { executor: e });
             workers.push(worker);
         }
-        
+
         CompImpl::new(id, workers, table)
     }
 }
@@ -206,7 +218,6 @@ impl<T: Task> Runner<Arc<T>> for CompRunner<T> {
         self.executor.execute(task)
     }
 }
-
 
 enum Message<T: Task> {
     NewTask(Arc<T>),
@@ -306,7 +317,9 @@ impl<T: Task> PipelineImpl<T> {
         loop {
             match rx.recv().unwrap() {
                 Message::NewTask(task) => self.new_task(task),
-                Message::Intermediate(comp_id, worker_id, task) => self.intermediate_task(comp_id, worker_id, task),
+                Message::Intermediate(comp_id, worker_id, task) => {
+                    self.intermediate_task(comp_id, worker_id, task)
+                }
                 Message::Query(sender, request) => self.query(sender, request),
                 Message::Stop => break,
             }
@@ -345,7 +358,7 @@ impl<T: Task> PipelineImpl<T> {
 
     fn intermediate_task(&mut self, comp_id: usize, worker_id: usize, task: Arc<T>) {
         self.table[comp_id].dec_processing(worker_id);
-        if task.is_finished() ||  self.table.is_last(comp_id) {
+        if task.is_finished() || self.table.is_last(comp_id) {
             let res = self.processing_tasks.remove(&task.get_id());
             assert!(res.is_some());
             (self.cb)(task);
@@ -386,7 +399,7 @@ impl<T: Task> PipelineImpl<T> {
                 sender.send(QueryResult::WaitingNum(num)).unwrap();
             }
         }
-    }   
+    }
 }
 
 impl<T: Task> CompImpl<T> {
@@ -404,7 +417,7 @@ impl<T: Task> CompImpl<T> {
         let view = &self.table[self.id];
         let buffered = view.buffered_num();
         assert_ne!(buffered, view.buf_cap);
-        
+
         if buffered != 0 {
             self.buffered_tasks.push(task);
             view.inc_buffered();
@@ -440,21 +453,21 @@ impl<T: Task> CompImpl<T> {
     }
 }
 
-impl<T: Task> FnOnce<(Arc<T>, )> for ExctCallBack<T> {
+impl<T: Task> FnOnce<(Arc<T>,)> for ExctCallBack<T> {
     type Output = ();
-    extern "rust-call" fn call_once(self, args: (Arc<T>, )) {
+    extern "rust-call" fn call_once(self, args: (Arc<T>,)) {
         self.call(args);
     }
 }
 
-impl<T: Task> FnMut<(Arc<T>, )> for ExctCallBack<T> {
-    extern "rust-call" fn call_mut(&mut self, args: (Arc<T>, )) {
+impl<T: Task> FnMut<(Arc<T>,)> for ExctCallBack<T> {
+    extern "rust-call" fn call_mut(&mut self, args: (Arc<T>,)) {
         self.call(args)
     }
 }
 
-impl<T: Task> Fn<(Arc<T>, )> for ExctCallBack<T> {
-    extern "rust-call" fn call(&self, args: (Arc<T>, )) {
+impl<T: Task> Fn<(Arc<T>,)> for ExctCallBack<T> {
+    extern "rust-call" fn call(&self, args: (Arc<T>,)) {
         let msg = Message::Intermediate(self.comp_id, self.worker_id, args.0);
         if self.tx.send(msg).is_err() {
             info!("pipeline was dropped");
