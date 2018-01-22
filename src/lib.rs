@@ -6,13 +6,10 @@ extern crate log;
 extern crate worker;
 
 use std::collections::{HashMap};
-use std::ops::{Index};
 use std::thread::{self, JoinHandle};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
-use std::sync::atomic::Ordering::SeqCst;
 
 use futures::Future;
 use futures::sync::oneshot;
@@ -20,8 +17,10 @@ use worker::general::{Runner, Worker};
 
 
 mod fifo;
+mod view;
 
 use self::fifo::Fifo;
+use self::view::{ViewTable, CompView, ExctView};
 
 #[derive(Debug)]
 pub struct NoComponent;
@@ -102,13 +101,13 @@ impl<T: Task> PipelineBuilder<T> {
 
         let (tx, rx) = mpsc::channel();
 
-        let mut table = vec![];
+        let mut views = vec![];
         for (i, comp) in self.comps.iter().enumerate() {
             let exct_views = comp.exct_views();
             let view = CompView::new(i, comp.buf_cap, exct_views);
-            table.push(view);
+            views.push(view);
         }
-        let table = Arc::new(ViewTable {views: table});
+        let table = Arc::new(ViewTable::new(views));
         let cap = table.capacity();
         
         let mut comps = vec![];
@@ -166,7 +165,7 @@ impl<T: Task> Component<T> {
     fn exct_views(&self) -> Vec<ExctView> {
         let mut ret  = Vec::with_capacity(self.executors.len());
         for (i, exct) in self.executors.iter().enumerate() {
-            let v = ExctView { id: i, concurrency: exct.concurrency(), processing: ATOMIC_USIZE_INIT};
+            let v = ExctView::new(i, exct.concurrency());
             ret.push(v)
         }
         ret
@@ -208,27 +207,6 @@ impl<T: Task> Runner<Arc<T>> for CompRunner<T> {
     }
 }
 
-#[derive(Debug)]
-struct ViewTable {
-    views: Vec<CompView>,
-}
-
-#[derive(Debug)]
-struct CompView {
-    id: usize,
-    buf_cap: usize,
-    buffered: AtomicUsize,
-    concurrency: usize,
-    processing: AtomicUsize,
-    exct_views: Vec<ExctView>,
-}
-
-#[derive(Debug)]
-struct ExctView {
-    id: usize,
-    concurrency: usize,
-    processing: AtomicUsize,
-}
 
 enum Message<T: Task> {
     NewTask(Arc<T>),
@@ -459,123 +437,6 @@ impl<T: Task> CompImpl<T> {
             }
         }
         res
-    }
-}
-
-impl ViewTable {
-    fn capacity(&self) -> usize {
-        let mut ret = self.views[self.views.len() - 1].concurrency;
-        for v in &self.views {
-            ret += v.buf_cap;
-        }
-        ret
-    }
-
-    fn vcant_num(&self, id: usize) -> usize {
-        let view = &self.views[id];
-        if view.buffered_num() != 0 {
-            return view.buf_vcant_num()
-        }
-
-        view.buf_cap + self.real_comp_vcant(id)
-    }
-
-    fn real_comp_vcant(&self, id: usize) -> usize {
-        let view = &self.views[id];
-        if !self.is_last(id) {
-            let next_vcant_num = self.vcant_num(id + 1);
-            let rhs = next_vcant_num - view.processing_num();
-            view.comp_vcant_num().min(rhs)
-        } else {
-            // this is the last view
-            view.comp_vcant_num()
-        }
-    }
-
-    fn is_last(&self, id: usize) -> bool {
-        self.views.len() - 1 == id
-    }
-}
-
-impl CompView {
-    fn new(id: usize, buf_cap: usize, exct_views: Vec<ExctView>) -> Self {
-        let concurrency = exct_views.iter().map(|e|e.concurrency).sum();
-        CompView {
-            id: id,
-            buf_cap: buf_cap,
-            buffered: ATOMIC_USIZE_INIT,
-            concurrency: concurrency,
-            processing: ATOMIC_USIZE_INIT,
-            exct_views: exct_views,
-        }
-    }
-
-    fn processing_num(&self) -> usize {
-        self.processing.load(SeqCst)
-    }
-
-    fn buffered_num(&self) -> usize {
-        self.buffered.load(SeqCst)
-    }
-
-    fn buf_vcant_num(&self) -> usize {
-        self.buf_cap - self.buffered_num()
-    }
-
-    fn comp_vcant_num(&self) -> usize {
-        self.concurrency - self.processing_num()
-    }
-
-    fn dec_processing(&self, id: usize) {
-        self.exct_views[id].dec();
-        self.processing.fetch_sub(1, SeqCst);
-    }
-
-    fn inc_processing(&self, id: usize) {
-        self.exct_views[id].inc();
-        self.processing.fetch_add(1, SeqCst);
-    }
-
-    fn dec_buffered(&self) {
-        self.buffered.fetch_sub(1, SeqCst);
-    }
-
-    fn inc_buffered(&self) {
-        self.buffered.fetch_add(1, SeqCst);
-    }
-
-    fn pick_one(&self) -> Option<usize> {
-        let mut max = 0;
-        let mut ret = None;
-        for (i, v) in self.exct_views.iter().enumerate() {
-            let vcant = v.vcant_num();
-            if vcant > max {
-                max = vcant;
-                ret = Some(i);
-            }
-        }
-        ret
-    }
-}
-
-impl Index<usize> for ViewTable {
-    type Output = CompView;
-    fn index(&self, index: usize) -> &CompView {
-        &self.views[index]
-    }
-}
-
-impl ExctView {
-    fn dec(&self) {
-        self.processing.fetch_sub(1, SeqCst);
-    }
-    
-    fn inc(&self) {
-        self.processing.fetch_add(1, SeqCst);
-    }
-
-    fn vcant_num(&self) -> usize {
-        self.concurrency - self.processing.load(SeqCst)
     }
 }
 
