@@ -141,6 +141,7 @@ impl Index<usize> for ViewTable {
 
 impl ExctView {
     pub fn new(id: usize, concurrency: usize) -> Self {
+        assert_ne!(concurrency, 0);
         ExctView {
             id: id,
             concurrency: concurrency,
@@ -149,6 +150,7 @@ impl ExctView {
     }
 
     fn dec(&self) {
+        assert_ne!(self.processing.load(SeqCst), 0);
         self.processing.fetch_sub(1, SeqCst);
     }
 
