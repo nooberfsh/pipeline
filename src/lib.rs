@@ -7,7 +7,9 @@ extern crate worker;
 
 mod fifo;
 mod view;
-pub mod pipeline;
+mod pipeline;
+
+pub use pipeline::*;
 
 #[derive(Debug)]
 pub enum Error {
