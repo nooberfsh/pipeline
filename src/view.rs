@@ -7,6 +7,7 @@ pub struct ViewTable {
     views: Vec<CompView>,
 }
 
+/// component view
 #[derive(Debug)]
 pub struct CompView {
     pub id: usize,
@@ -17,6 +18,7 @@ pub struct CompView {
     exct_views: Vec<ExctView>,
 }
 
+/// executor view
 #[derive(Debug)]
 pub struct ExctView {
     id: usize,
@@ -26,14 +28,16 @@ pub struct ExctView {
 
 impl ViewTable {
     pub fn new(views: Vec<CompView>) -> Self {
+        views
+            .iter()
+            .enumerate()
+            .for_each(|(i, v)| assert_eq!(i, v.id));
         ViewTable { views: views }
     }
 
     pub fn capacity(&self) -> usize {
         let mut ret = self.views[self.views.len() - 1].concurrency;
-        for v in &self.views {
-            ret += v.buf_cap;
-        }
+        self.views.iter().for_each(|v| ret += v.buf_cap);
         ret
     }
 
@@ -65,6 +69,10 @@ impl ViewTable {
 
 impl CompView {
     pub fn new(id: usize, buf_cap: usize, exct_views: Vec<ExctView>) -> Self {
+        exct_views
+            .iter()
+            .enumerate()
+            .for_each(|(i, v)| assert_eq!(i, v.id));
         let concurrency = exct_views.iter().map(|e| e.concurrency).sum();
         CompView {
             id: id,
