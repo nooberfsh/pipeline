@@ -410,7 +410,7 @@ impl<T: Task> CompImpl<T> {
             self.buffered_tasks.push(task);
             view.inc_buffered();
         } else {
-            let idx = view.pick_one().unwrap();
+            let idx = view.pick_min().unwrap();
             self.workers[idx].schedule(task);
             view.inc_processing(idx);
         }
@@ -423,7 +423,7 @@ impl<T: Task> CompImpl<T> {
         for _ in 0..rcv {
             if let Some(task) = self.buffered_tasks.pop() {
                 view.dec_buffered();
-                let idx = view.pick_one().unwrap();
+                let idx = view.pick_min().unwrap();
                 self.workers[idx].schedule(task);
                 view.inc_processing(idx);
                 res += 1;
