@@ -16,3 +16,6 @@ pub enum Error {
     NoComponent,
     NoTaskFinishHandle,
 }
+
+#[cfg(test)]
+mod tests;

@@ -387,6 +387,7 @@ impl<T: Task> PipelineImpl<T> {
 impl<T: Task> CompImpl<T> {
     fn new(id: usize, workers: Vec<Worker<Arc<T>>>, table: Arc<ViewTable>) -> Self {
         assert!(!workers.is_empty());
+        assert!(id < table.len());
         CompImpl {
             id: id,
             buffered_tasks: Fifo::new(),
@@ -463,6 +464,188 @@ impl<T: Task> Clone for ExctCallBack<T> {
             tx: self.tx.clone(),
             comp_id: self.comp_id,
             worker_id: self.worker_id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate env_logger;
+
+    use super::*;
+    use tests::*;
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, ATOMIC_BOOL_INIT, ATOMIC_USIZE_INIT};
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::Mutex;
+
+    #[test]
+    fn test_comp_impl() {
+        let _ = env_logger::init();
+        // l0's concurrncy < l1's vcant_num
+        let vt = create_table(vec![[2, 2], [2, 2]]);
+        check_comp_impl(vt);
+
+        // l0's concurrncy = l1's vcant_num
+        let vt = create_table(vec![[2, 4], [2, 2]]);
+        check_comp_impl(vt);
+
+        // l0's concurrncy > l1's vcant_num
+        let vt = create_table(vec![[2, 8], [2, 2]]);
+        check_comp_impl(vt);
+    }
+
+    fn check_comp_impl(table: ViewTable) {
+        let idx = table.len() - 1;
+        let vts = table_permutation(table, idx);
+        for vt in vts {
+            for i in 0..vt.len() - 1 {
+                check_accept_task(Arc::new(vt.clone()), i);
+                check_transfer_to_worker(Arc::new(vt.clone()), i);
+            }
+        }
+    }
+
+    fn check_accept_task(table: Arc<ViewTable>, idx: usize) {
+        static ID: AtomicUsize = ATOMIC_USIZE_INIT;
+
+        let view = &table[idx];
+        let w = Worker::new("check_accpet_task", SimpleRunner);
+        let mut comp = CompImpl::new(idx, vec![w], Arc::clone(&table));
+        while view.buffered_num() != view.buf_cap {
+            let r = table.real_comp_vcant(idx);
+            let b = view.buffered_num();
+            let p = view.processing_num();
+            let task = SimpleTask::new(ID.fetch_add(1, SeqCst));
+            comp.accept_task(Arc::new(task));
+            if r == 0 {
+                assert_eq!(view.buffered_num(), b + 1);
+                assert_eq!(view.processing_num(), p);
+            } else {
+                assert_eq!(view.buffered_num(), b);
+                assert_eq!(view.processing_num(), p + 1);
+            }
+        }
+    }
+
+    fn check_transfer_to_worker(table: Arc<ViewTable>, idx: usize) {
+        info!("idx = {}", idx);
+        let mut comp = simple_component("check_transfer_to_worker", idx, Arc::clone(&table));
+        assert_eq!(comp.transfer_to_worker(), 0);
+
+        let view = &table[idx];
+        let b = view.buffered_num();
+        let p = view.processing_num();
+        if p == 0 {
+            return;
+        }
+        view.dec_processing(0);
+
+        if !table.is_last(idx) {
+            let mut comp =
+                simple_component("check_transfer_to_worker", idx + 1, Arc::clone(&table));
+            let task = SimpleTask::new(!0);
+            comp.accept_task(Arc::new(task));
+        }
+
+        let vcant = table.real_comp_vcant(idx);
+        let transfered = comp.transfer_to_worker();
+        if vcant == 0 {
+            assert_eq!(transfered, 0);
+            assert_eq!(view.buffered_num(), b);
+            assert_eq!(view.processing_num(), p - 1);
+        } else {
+            if b != 0 {
+                assert_eq!(transfered, 1);
+                assert_eq!(view.buffered_num(), b - 1);
+                assert_eq!(view.processing_num(), p);
+            } else {
+                assert_eq!(transfered, 0);
+                assert_eq!(view.buffered_num(), 0);
+                assert_eq!(view.processing_num(), p - 1);
+            }
+        }
+    }
+
+    fn simple_component(name: &str, idx: usize, table: Arc<ViewTable>) -> CompImpl<SimpleTask> {
+        static ID: AtomicUsize = ATOMIC_USIZE_INIT;
+        let w = Worker::new(name, SimpleRunner);
+        let mut comp = CompImpl::new(idx, vec![w], Arc::clone(&table));
+        for _ in 0..table[idx].buffered_num() {
+            let task = SimpleTask::new(ID.fetch_add(1, SeqCst));
+            comp.buffered_tasks.push(Arc::new(task));
+        }
+        comp
+    }
+
+    struct SimpleRunner;
+
+    impl Runner<Arc<SimpleTask>> for SimpleRunner {
+        fn run(&mut self, _: Arc<SimpleTask>) {}
+    }
+
+    struct SimpleTask {
+        id: usize,
+        is_finished: AtomicBool,
+        is_abandoned: AtomicBool,
+    }
+
+    impl SimpleTask {
+        fn new(id: usize) -> Self {
+            SimpleTask {
+                id: id,
+                is_finished: ATOMIC_BOOL_INIT,
+                is_abandoned: ATOMIC_BOOL_INIT,
+            }
+        }
+    }
+
+    impl Task for SimpleTask {
+        type Id = usize;
+        fn get_id(&self) -> usize {
+            self.id
+        }
+        fn is_finished(&self) -> bool {
+            self.is_finished.load(SeqCst)
+        }
+        fn abandon(&self) {
+            self.is_abandoned.store(true, SeqCst);
+        }
+    }
+
+    struct SimpleExecutor {
+        cb: Option<ExctCallBack<SimpleTask>>,
+        concurrency: usize,
+        pending: Arc<Mutex<Fifo<Arc<SimpleTask>>>>,
+        finished: Arc<Mutex<Fifo<Arc<SimpleTask>>>>,
+        is_runing: AtomicBool,
+    }
+
+    impl SimpleExecutor {
+        fn new(con: usize) -> Self {
+            SimpleExecutor {
+                cb: None,
+                concurrency: con,
+                pending: Arc::default(),
+                finished: Arc::default(),
+                is_runing: ATOMIC_BOOL_INIT,
+            }
+        }
+    }
+
+    impl Executor<SimpleTask> for SimpleExecutor {
+        fn register_cb(&mut self, cb: ExctCallBack<SimpleTask>) {
+            self.cb = Some(cb)
+        }
+        fn execute(&mut self, task: Arc<SimpleTask>) {
+            let mut lock = self.pending.lock().unwrap();
+            lock.push(task);
+        }
+        fn concurrency(&self) -> usize {
+            self.concurrency
+        }
+        fn run(&mut self) {
+            self.is_runing.store(true, SeqCst);
         }
     }
 }
