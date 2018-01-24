@@ -43,7 +43,6 @@ pub struct PipelineBuilder<T: Task> {
 pub struct Pipeline<T: Task> {
     cap: usize,
     tx: Sender<Message<T>>,
-    rx: Option<Receiver<Message<T>>>,
     inner: Option<PipelineImpl<T>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -51,6 +50,7 @@ pub struct Pipeline<T: Task> {
 struct PipelineImpl<T: Task> {
     processing_tasks: HashMap<T::Id, Arc<T>>,
     waiting_tasks: Fifo<Arc<T>>,
+    rx: Receiver<Message<T>>,
     cb: Box<Fn(Arc<T>) + Send>,
     comps: Vec<CompImpl<T>>,
     table: Arc<ViewTable>,
@@ -99,18 +99,10 @@ impl<T: Task> PipelineBuilder<T> {
             comps.push(comp_impl);
         }
 
-        let inner = PipelineImpl {
-            processing_tasks: HashMap::new(),
-            waiting_tasks: Fifo::new(),
-            cb: self.cb.unwrap(),
-            comps: comps,
-            table: table,
-        };
-
+        let inner = PipelineImpl::new(rx, self.cb.unwrap(), comps, table);
         let ret = Pipeline {
             cap: cap,
             tx: tx,
-            rx: Some(rx),
             inner: Some(inner),
             handle: None,
         };
@@ -238,11 +230,10 @@ macro_rules! query {
 
 impl<T: Task> Pipeline<T> {
     pub fn run(&mut self) {
-        let rx = self.rx.take().unwrap();
         let mut inner = self.inner.take().unwrap();
         let handle = thread::Builder::new()
             .name("pipeline".into())
-            .spawn(move || inner.run(&rx))
+            .spawn(move || inner.run())
             .unwrap();
         self.handle = Some(handle);
     }
@@ -295,9 +286,31 @@ impl<T: Task> Drop for Pipeline<T> {
 }
 
 impl<T: Task> PipelineImpl<T> {
-    fn run(&mut self, rx: &Receiver<Message<T>>) {
+    fn new(
+        rx: Receiver<Message<T>>,
+        cb: Box<Fn(Arc<T>) + Send>,
+        comps: Vec<CompImpl<T>>,
+        table: Arc<ViewTable>,
+    ) -> Self {
+        assert_eq!(comps.len(), table.len());
+        for i in 0..comps.len() {
+            assert_eq!(comps[i].id, i);
+            assert_eq!(comps[i].id, table[i].id);
+        }
+
+        PipelineImpl {
+            processing_tasks: HashMap::new(),
+            waiting_tasks: Fifo::new(),
+            rx: rx,
+            cb: cb,
+            comps: comps,
+            table: table,
+        }
+    }
+
+    fn run(&mut self) {
         loop {
-            match rx.recv().unwrap() {
+            match self.rx.recv().unwrap() {
                 Message::NewTask(task) => self.new_task(task),
                 Message::Intermediate(comp_id, worker_id, task) => {
                     self.intermediate_task(comp_id, worker_id, task)
@@ -529,7 +542,6 @@ mod tests {
     }
 
     fn check_transfer_to_worker(table: Arc<ViewTable>, idx: usize) {
-        info!("idx = {}", idx);
         let mut comp = simple_component("check_transfer_to_worker", idx, Arc::clone(&table));
         assert_eq!(comp.transfer_to_worker(), 0);
 
