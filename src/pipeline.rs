@@ -10,7 +10,7 @@ use worker::general::{Runner, Worker};
 
 use fifo::Fifo;
 use view::{CompView, ExctView, ViewTable};
-use Error;
+use NoComponent;
 
 pub trait Task: Send + Sync + 'static {
     type Id: Hash + Eq + Ord + Send;
@@ -37,7 +37,7 @@ pub struct ExctCallBack<T: Task> {
 
 pub struct PipelineBuilder<T: Task> {
     comps: Vec<Component<T>>,
-    cb: Option<Box<Fn(Arc<T>) + Send>>,
+    cb: Box<Fn(Arc<T>) + Send>,
 }
 
 pub struct Pipeline<T: Task> {
@@ -57,16 +57,11 @@ struct PipelineImpl<T: Task> {
 }
 
 impl<T: Task> PipelineBuilder<T> {
-    pub fn new() -> Self {
+    pub fn new<F: Fn(Arc<T>) + Send + 'static>(cb: F) -> Self {
         PipelineBuilder {
             comps: vec![],
-            cb: None,
+            cb: Box::new(cb),
         }
-    }
-
-    pub fn cb<F: Fn(Arc<T>) + Send + 'static>(mut self, cb: F) -> Self {
-        self.cb = Some(Box::new(cb));
-        self
     }
 
     pub fn add_comp(mut self, comp: Component<T>) -> Self {
@@ -74,12 +69,9 @@ impl<T: Task> PipelineBuilder<T> {
         self
     }
 
-    pub fn build(self) -> Result<Pipeline<T>, Error> {
-        if self.cb.is_none() {
-            return Err(Error::NoTaskFinishHandle);
-        }
+    pub fn build(self) -> Result<Pipeline<T>, NoComponent> {
         if self.comps.is_empty() {
-            return Err(Error::NoComponent);
+            return Err(NoComponent);
         }
 
         let (tx, rx) = mpsc::channel();
@@ -95,11 +87,11 @@ impl<T: Task> PipelineBuilder<T> {
 
         let mut comps = vec![];
         for (i, comp) in self.comps.into_iter().enumerate() {
-            let comp_impl = comp.into_comp_impl(i, tx.clone(), Arc::clone(&table));
+            let comp_impl = comp.into_comp_impl(i, &tx, Arc::clone(&table));
             comps.push(comp_impl);
         }
 
-        let inner = PipelineImpl::new(rx, self.cb.unwrap(), comps, table);
+        let inner = PipelineImpl::new(rx, self.cb, comps, table);
         let ret = Pipeline {
             cap: cap,
             tx: tx,
@@ -131,7 +123,7 @@ impl<T: Task> Component<T> {
         buf_cap: usize,
         exs: Vec<E>,
     ) -> Self {
-        assert!(exs.len() > 0);
+        assert!(exs.is_empty());
         exs.iter().for_each(|e| assert!(e.concurrency() > 0));
 
         Component {
@@ -155,7 +147,7 @@ impl<T: Task> Component<T> {
     fn into_comp_impl(
         self,
         id: usize,
-        tx: Sender<Message<T>>,
+        tx: &Sender<Message<T>>,
         table: Arc<ViewTable>,
     ) -> CompImpl<T> {
         let mut workers = vec![];
@@ -200,11 +192,12 @@ enum Message<T: Task> {
     Stop,
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 enum QueryRequest {
     TotalNum,
     ProcessingNum,
     WaitingNum,
+    ViewTable,
 }
 
 #[derive(Debug)]
@@ -212,6 +205,7 @@ enum QueryResult {
     TotalNum(usize),
     ProcessingNum(usize),
     WaitingNum(usize),
+    ViewTable(ViewTable),
 }
 
 macro_rules! query {
@@ -271,6 +265,15 @@ impl<T: Task> Pipeline<T> {
         query!(
             QueryRequest::WaitingNum,
             QueryResult::WaitingNum,
+            self.tx.clone()
+        )
+    }
+
+    #[allow(dead_code)]
+    fn view_table(&self) -> ViewTable {
+        query!(
+            QueryRequest::ViewTable,
+            QueryResult::ViewTable,
             self.tx.clone()
         )
     }
@@ -393,6 +396,10 @@ impl<T: Task> PipelineImpl<T> {
                 let num = self.waiting_tasks.len();
                 sender.send(QueryResult::WaitingNum(num)).unwrap();
             }
+            QueryRequest::ViewTable => {
+                let table = (*self.table).clone();
+                sender.send(QueryResult::ViewTable(table)).unwrap();
+            }
         }
     }
 }
@@ -493,6 +500,133 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn test_pipeline() {
+        let _ = env_logger::init();
+
+        const FETCH_ID: usize = 0;
+        const COMPUTE_ID: usize = 1;
+        const STORE_ID: usize = 2;
+
+        let (exct_tx, exct_rx) = mpsc::channel();
+        let fetch = SimpleExecutor::new(FETCH_ID, 2, exct_tx.clone());
+        let compute = SimpleExecutor::new(COMPUTE_ID, 2, exct_tx.clone());
+        let store = SimpleExecutor::new(STORE_ID, 2, exct_tx);
+
+        let fetch_comp = Component::new("fetch", 2, fetch.clone());
+        let compute_comp = Component::new("compute", 2, compute.clone());
+        let store_comp = Component::new("store", 2, store.clone());
+
+        let (tx, rx) = mpsc::channel();
+        let cb = move |t| tx.send(t).unwrap();
+
+        let mut pipeline = PipelineBuilder::new(cb)
+            .add_comp(fetch_comp)
+            .add_comp(compute_comp)
+            .add_comp(store_comp)
+            .build()
+            .unwrap();
+        pipeline.run();
+        pipeline.accept_task(simple_task()).unwrap();
+        assert_eq!(exct_rx.recv().unwrap(), FETCH_ID);
+
+        let table = pipeline.view_table();
+        assert_eq!(table.len(), 3);
+        check_view(&table[0], 0, 1);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        fetch.handle_one();
+        assert_eq!(exct_rx.recv().unwrap(), COMPUTE_ID);
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 1);
+        check_view(&table[2], 0, 0);
+
+        compute.handle_one();
+        assert_eq!(exct_rx.recv().unwrap(), STORE_ID);
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 1);
+
+        store.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        let _ = rx.recv().unwrap();
+
+        //test three tasks
+        (1..4).for_each(|_| pipeline.accept_task(simple_task()).unwrap());
+
+        let table = pipeline.view_table();
+        assert_eq!(exct_rx.recv().unwrap(), FETCH_ID);
+        assert_eq!(exct_rx.recv().unwrap(), FETCH_ID);
+        check_view(&table[0], 1, 2);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        fetch.handle_one();
+        let table = pipeline.view_table();
+        let a = exct_rx.recv().unwrap();
+        let b = exct_rx.recv().unwrap();
+        let mut v = vec![a, b];
+        v.sort();
+        assert_eq!(v, vec![FETCH_ID, COMPUTE_ID]);
+        check_view(&table[0], 0, 2);
+        check_view(&table[1], 0, 1);
+        check_view(&table[2], 0, 0);
+
+        compute.handle_one();
+        let table = pipeline.view_table();
+        assert_eq!(exct_rx.recv().unwrap(), STORE_ID);
+        check_view(&table[0], 0, 2);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 1);
+
+        fetch.handle_one();
+        fetch.handle_one();
+        let table = pipeline.view_table();
+        assert_eq!(exct_rx.recv().unwrap(), COMPUTE_ID);
+        assert_eq!(exct_rx.recv().unwrap(), COMPUTE_ID);
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 2);
+        check_view(&table[2], 0, 1);
+
+        compute.handle_one();
+        compute.handle_one();
+        let table = pipeline.view_table();
+        assert_eq!(exct_rx.recv().unwrap(), STORE_ID);
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 1, 2);
+
+        store.handle_one();
+        let table = pipeline.view_table();
+        assert_eq!(exct_rx.recv().unwrap(), STORE_ID);
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 2);
+
+        store.handle_one();
+        store.handle_one();
+        let table = pipeline.view_table();
+        check_view(&table[0], 0, 0);
+        check_view(&table[1], 0, 0);
+        check_view(&table[2], 0, 0);
+
+        for _ in 1..4 {
+            let _ = rx.recv().unwrap();
+        }
+    }
+
+    fn check_view(v: &CompView, buffered: usize, processing: usize) {
+        assert_eq!(v.buffered_num(), buffered);
+        assert_eq!(v.processing_num(), processing);
+    }
+
+    #[test]
     fn test_comp_impl() {
         let _ = env_logger::init();
         // l0's concurrncy < l1's vcant_num
@@ -520,8 +654,6 @@ mod tests {
     }
 
     fn check_accept_task(table: Arc<ViewTable>, idx: usize) {
-        static ID: AtomicUsize = ATOMIC_USIZE_INIT;
-
         let view = &table[idx];
         let w = Worker::new("check_accpet_task", SimpleRunner);
         let mut comp = CompImpl::new(idx, vec![w], Arc::clone(&table));
@@ -529,8 +661,7 @@ mod tests {
             let r = table.real_comp_vcant(idx);
             let b = view.buffered_num();
             let p = view.processing_num();
-            let task = SimpleTask::new(ID.fetch_add(1, SeqCst));
-            comp.accept_task(Arc::new(task));
+            comp.accept_task(simple_task());
             if r == 0 {
                 assert_eq!(view.buffered_num(), b + 1);
                 assert_eq!(view.processing_num(), p);
@@ -556,8 +687,7 @@ mod tests {
         if !table.is_last(idx) {
             let mut comp =
                 simple_component("check_transfer_to_worker", idx + 1, Arc::clone(&table));
-            let task = SimpleTask::new(!0);
-            comp.accept_task(Arc::new(task));
+            comp.accept_task(simple_task());
         }
 
         let vcant = table.real_comp_vcant(idx);
@@ -580,14 +710,17 @@ mod tests {
     }
 
     fn simple_component(name: &str, idx: usize, table: Arc<ViewTable>) -> CompImpl<SimpleTask> {
-        static ID: AtomicUsize = ATOMIC_USIZE_INIT;
         let w = Worker::new(name, SimpleRunner);
         let mut comp = CompImpl::new(idx, vec![w], Arc::clone(&table));
         for _ in 0..table[idx].buffered_num() {
-            let task = SimpleTask::new(ID.fetch_add(1, SeqCst));
-            comp.buffered_tasks.push(Arc::new(task));
+            comp.buffered_tasks.push(simple_task());
         }
         comp
+    }
+
+    fn simple_task() -> Arc<SimpleTask> {
+        static ID: AtomicUsize = ATOMIC_USIZE_INIT;
+        Arc::new(SimpleTask::new(ID.fetch_add(1, SeqCst)))
     }
 
     struct SimpleRunner;
@@ -596,6 +729,7 @@ mod tests {
         fn run(&mut self, _: Arc<SimpleTask>) {}
     }
 
+    #[derive(Debug)]
     struct SimpleTask {
         id: usize,
         is_finished: AtomicBool,
@@ -626,38 +760,75 @@ mod tests {
     }
 
     struct SimpleExecutor {
-        cb: Option<ExctCallBack<SimpleTask>>,
+        id: usize,
         concurrency: usize,
+        cb: Arc<Mutex<Option<ExctCallBack<SimpleTask>>>>,
         pending: Arc<Mutex<Fifo<Arc<SimpleTask>>>>,
         finished: Arc<Mutex<Fifo<Arc<SimpleTask>>>>,
         is_runing: AtomicBool,
+        // indicate receive a task
+        tx: Sender<usize>,
     }
 
     impl SimpleExecutor {
-        fn new(con: usize) -> Self {
+        fn new(id: usize, con: usize, tx: Sender<usize>) -> Self {
             SimpleExecutor {
-                cb: None,
+                id: id,
                 concurrency: con,
+                cb: Arc::default(),
                 pending: Arc::default(),
                 finished: Arc::default(),
                 is_runing: ATOMIC_BOOL_INIT,
+                tx: tx,
             }
+        }
+
+        fn handle_one(&self) {
+            let task = {
+                let mut lock = self.pending.lock().unwrap();
+                let task = lock.pop();
+                assert!(task.is_some());
+                task.unwrap()
+            };
+            {
+                let mut lock = self.finished.lock().unwrap();
+                lock.push(Arc::clone(&task));
+            }
+            let lock = self.cb.lock().unwrap();
+            lock.as_ref().unwrap()(task);
         }
     }
 
     impl Executor<SimpleTask> for SimpleExecutor {
         fn register_cb(&mut self, cb: ExctCallBack<SimpleTask>) {
-            self.cb = Some(cb)
+            let mut lock = self.cb.lock().unwrap();
+            *lock = Some(cb);
         }
         fn execute(&mut self, task: Arc<SimpleTask>) {
             let mut lock = self.pending.lock().unwrap();
             lock.push(task);
+            drop(lock);
+            self.tx.send(self.id).unwrap();
         }
         fn concurrency(&self) -> usize {
             self.concurrency
         }
         fn run(&mut self) {
             self.is_runing.store(true, SeqCst);
+        }
+    }
+
+    impl Clone for SimpleExecutor {
+        fn clone(&self) -> Self {
+            SimpleExecutor {
+                id: self.id,
+                cb: self.cb.clone(),
+                concurrency: self.concurrency,
+                pending: self.pending.clone(),
+                finished: self.finished.clone(),
+                is_runing: AtomicBool::new(self.is_runing.load(SeqCst)),
+                tx: self.tx.clone(),
+            }
         }
     }
 }

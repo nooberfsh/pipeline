@@ -12,10 +12,7 @@ mod pipeline;
 pub use pipeline::*;
 
 #[derive(Debug)]
-pub enum Error {
-    NoComponent,
-    NoTaskFinishHandle,
-}
+pub struct NoComponent;
 
 #[cfg(test)]
 mod tests;
