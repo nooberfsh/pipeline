@@ -11,19 +11,28 @@ pub struct ViewTable {
 /// Component view
 #[derive(Debug)]
 pub struct CompView {
+    /// The index into the view table.
     pub id: usize,
+    /// The component's buffer capacity.
     pub buf_cap: usize,
+    /// The max count of the tasks the component can execute concurrently.
     pub concurrency: usize,
+    /// Executor view table.
     pub exct_views: Vec<ExctView>,
+    /// Buffered tasks count.
     buffered: AtomicUsize,
+    /// Processing tasks count.
     processing: AtomicUsize,
 }
 
 /// Executor view
 #[derive(Debug)]
 pub struct ExctView {
+    /// The index into the executor table.
     pub id: usize,
+    /// The max count of the tasks the executor can run concurrently.
     pub concurrency: usize,
+    /// Processing tasks count.
     processing: AtomicUsize,
 }
 
