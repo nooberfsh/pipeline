@@ -225,7 +225,7 @@ impl Clone for ExctView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tests::*;
+    use tests_util::*;
 
     #[test]
     fn test_comp_view() {

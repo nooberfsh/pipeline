@@ -15,4 +15,4 @@ pub use pipeline::*;
 pub struct NoComponent;
 
 #[cfg(test)]
-mod tests;
+mod tests_util;

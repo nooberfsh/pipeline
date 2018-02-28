@@ -493,7 +493,7 @@ mod tests {
     extern crate env_logger;
 
     use super::*;
-    use tests::*;
+    use tests_util::*;
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, ATOMIC_BOOL_INIT, ATOMIC_USIZE_INIT};
     use std::sync::atomic::Ordering::SeqCst;
