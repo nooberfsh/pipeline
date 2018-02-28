@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+/// A `First In, First Out` queue.
 #[derive(Debug)]
 pub struct Fifo<T> {
     q: VecDeque<T>,

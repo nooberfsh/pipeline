@@ -2,12 +2,13 @@ use std::ops::Index;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 
+/// Component view table.
 #[derive(Clone, Debug)]
 pub struct ViewTable {
     views: Vec<CompView>,
 }
 
-/// component view
+/// Component view
 #[derive(Debug)]
 pub struct CompView {
     pub id: usize,
@@ -18,7 +19,7 @@ pub struct CompView {
     processing: AtomicUsize,
 }
 
-/// executor view
+/// Executor view
 #[derive(Debug)]
 pub struct ExctView {
     pub id: usize,
@@ -27,6 +28,7 @@ pub struct ExctView {
 }
 
 impl ViewTable {
+    /// Create a compoent view table.
     pub fn new(views: Vec<CompView>) -> Self {
         views
             .iter()
@@ -36,12 +38,14 @@ impl ViewTable {
         ViewTable { views: views }
     }
 
+    /// Get the pipeline's capacity.
     pub fn capacity(&self) -> usize {
         let mut ret = self.views[self.views.len() - 1].concurrency;
         self.views.iter().for_each(|v| ret += v.buf_cap);
         ret
     }
 
+    /// Get vcant count of the corresponding pipeline's component.
     pub fn vcant_num(&self, id: usize) -> usize {
         let view = &self.views[id];
         if view.buffered_num() != 0 {
@@ -51,6 +55,7 @@ impl ViewTable {
         view.buf_cap + self.real_comp_vcant(id)
     }
 
+    /// Get vcant count of the corresponding user's component.
     pub fn real_comp_vcant(&self, id: usize) -> usize {
         let view = &self.views[id];
         if !self.is_last(id) {
