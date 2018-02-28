@@ -11,6 +11,7 @@ mod pipeline;
 
 pub use pipeline::*;
 
+/// An error indicate that there is no component.
 #[derive(Debug)]
 pub struct NoComponent;
 

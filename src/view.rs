@@ -30,7 +30,7 @@ pub struct CompView {
 pub struct ExctView {
     /// The index into the executor table.
     pub id: usize,
-    /// The max count of the tasks the executor can run concurrently.
+    /// The max count of the tasks the executor can execute concurrently.
     pub concurrency: usize,
     /// Processing tasks count.
     processing: AtomicUsize,

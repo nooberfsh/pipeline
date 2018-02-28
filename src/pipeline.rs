@@ -12,34 +12,49 @@ use fifo::Fifo;
 use view::{CompView, ExctView, ViewTable};
 use NoComponent;
 
+/// User defined task should implement this trait.
 pub trait Task: Send + Sync + 'static {
+    /// Task Id.
     type Id: Hash + Eq + Ord + Send;
 
+    /// Get task id.
     fn get_id(&self) -> Self::Id;
+    /// Check if the task is finished.
     fn is_finished(&self) -> bool;
+    /// It will be called when the `Pipeline` is dropping.
     fn abandon(&self) {}
 }
 
+/// User defined Executor should implement this trait.
 pub trait Executor<T: Task>: Send + 'static {
+    /// Register the task finished call back.
+    ///
+    /// When a task is finished, User must call this call back.
     fn register_cb(&mut self, cb: ExctCallBack<T>);
+    /// Execute a task.
     fn execute(&mut self, task: Arc<T>);
+    /// The max count of tasks the executor can execute concurrently.
     fn concurrency(&self) -> usize {
         1
     }
+    /// Start the executor
     fn run(&mut self) {}
 }
 
+/// Task finish call back.
 pub struct ExctCallBack<T: Task> {
     tx: Sender<Message<T>>,
     comp_id: usize,
     worker_id: usize,
 }
 
+/// Pipeline buidler.
 pub struct PipelineBuilder<T: Task> {
     comps: Vec<Component<T>>,
     cb: Box<Fn(Arc<T>) + Send>,
 }
 
+/// Pipeline wrapper.
 pub struct Pipeline<T: Task> {
     cap: usize,
     tx: Sender<Message<T>>,
@@ -47,6 +62,7 @@ pub struct Pipeline<T: Task> {
     handle: Option<JoinHandle<()>>,
 }
 
+/// Real pipeline.
 struct PipelineImpl<T: Task> {
     processing_tasks: HashMap<T::Id, Arc<T>>,
     waiting_tasks: Fifo<Arc<T>>,
@@ -57,6 +73,7 @@ struct PipelineImpl<T: Task> {
 }
 
 impl<T: Task> PipelineBuilder<T> {
+    /// Create a pipeline builder.
     pub fn new<F: Fn(Arc<T>) + Send + 'static>(cb: F) -> Self {
         PipelineBuilder {
             comps: vec![],
@@ -64,11 +81,16 @@ impl<T: Task> PipelineBuilder<T> {
         }
     }
 
+    /// Add a `Component`.
     pub fn add_comp(mut self, comp: Component<T>) -> Self {
         self.comps.push(comp);
         self
     }
 
+    /// Create a pipeline.
+    ///
+    /// It may return `NoComponent` when user does not feed any component
+    /// to the buidler.
     pub fn build(self) -> Result<Pipeline<T>, NoComponent> {
         if self.comps.is_empty() {
             return Err(NoComponent);
@@ -102,6 +124,7 @@ impl<T: Task> PipelineBuilder<T> {
     }
 }
 
+/// Component Buidler.
 pub struct Component<T: Task> {
     name: String,
     buf_cap: usize,
@@ -109,6 +132,7 @@ pub struct Component<T: Task> {
 }
 
 impl<T: Task> Component<T> {
+    /// Create a component with single Executor.
     pub fn new<N: Into<String>, E: Executor<T>>(name: N, buf_cap: usize, e: E) -> Self {
         assert!(e.concurrency() >= 1);
         Component {
@@ -118,6 +142,7 @@ impl<T: Task> Component<T> {
         }
     }
 
+    /// Create a component with multiple Executors.
     pub fn new_with_multi_executor<N: Into<String>, E: Executor<T>>(
         name: N,
         buf_cap: usize,
@@ -144,6 +169,7 @@ impl<T: Task> Component<T> {
         ret
     }
 
+    /// Create the real component.
     fn into_comp_impl(
         self,
         id: usize,
@@ -168,6 +194,7 @@ impl<T: Task> Component<T> {
     }
 }
 
+/// Real component.
 pub struct CompImpl<T: Task> {
     id: usize,
     buffered_tasks: Fifo<Arc<T>>,
@@ -186,12 +213,17 @@ impl<T: Task> Runner<Arc<T>> for CompRunner<T> {
 }
 
 enum Message<T: Task> {
+    /// Pipeline accept a new task.
     NewTask(Arc<T>),
+    /// Task returned by one component.
     Intermediate(usize, usize, Arc<T>),
+    /// Query Request.
     Query(oneshot::Sender<QueryResult>, QueryRequest),
+    /// Indicate the pipeline is dropping.
     Stop,
 }
 
+/// Query Request.
 #[derive(Copy, Clone, Debug)]
 enum QueryRequest {
     TotalNum,
@@ -200,6 +232,7 @@ enum QueryRequest {
     ViewTable,
 }
 
+/// Query Result.
 #[derive(Debug)]
 enum QueryResult {
     TotalNum(usize),
@@ -223,6 +256,7 @@ macro_rules! query {
 }
 
 impl<T: Task> Pipeline<T> {
+    /// Run the pipeline asynchronously.
     pub fn run(&mut self) {
         let mut inner = self.inner.take().unwrap();
         let handle = thread::Builder::new()
@@ -232,6 +266,9 @@ impl<T: Task> Pipeline<T> {
         self.handle = Some(handle);
     }
 
+    /// Accept a new task.
+    ///
+    /// It may return error when `self.capacity() == self.total_num()`
     pub fn accept_task(&self, task: Arc<T>) -> Result<(), Arc<T>> {
         if self.total_num() < self.cap {
             self.tx.send(Message::NewTask(task)).unwrap();
@@ -241,10 +278,12 @@ impl<T: Task> Pipeline<T> {
         }
     }
 
+    /// Get the capacity of the pipeline.
     pub fn capacity(&self) -> usize {
         self.cap
     }
 
+    /// Get the total tasks count in the pipeline.
     pub fn total_num(&self) -> usize {
         query!(
             QueryRequest::TotalNum,
@@ -253,6 +292,7 @@ impl<T: Task> Pipeline<T> {
         )
     }
 
+    /// Get the processing tasks count.
     pub fn processing_num(&self) -> usize {
         query!(
             QueryRequest::ProcessingNum,
@@ -261,6 +301,7 @@ impl<T: Task> Pipeline<T> {
         )
     }
 
+    /// Get the waiting tasks count.
     pub fn waiting_num(&self) -> usize {
         query!(
             QueryRequest::WaitingNum,
